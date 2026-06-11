@@ -170,3 +170,17 @@ def resolve_household(phone: str) -> str:
     """Map an inbound phone number to a household_id (default for unknown)."""
     index = _read_json(DATA_DIR / "households" / "index.json") or {}
     return index.get(phone, DEFAULT_HOUSEHOLD_ID)
+
+
+# ── lightweight per-household state (e.g. the current grocery list) ────────
+def set_current_list(household_id: str, list_id: str) -> None:
+    with household_lock(household_id):
+        path = _hid_dir(household_id) / "state.json"
+        state = _read_json(path) or {}
+        state["current_list_id"] = list_id
+        _write_json(path, state)
+
+
+def current_list_id(household_id: str) -> Optional[str]:
+    state = _read_json(_hid_dir(household_id) / "state.json") or {}
+    return state.get("current_list_id")
