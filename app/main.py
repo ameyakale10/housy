@@ -8,7 +8,7 @@
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel
 
-from app import brain, config, identity, store
+from app import brain, config, identity, invites, store
 from app.channels import whatsapp
 
 app = FastAPI(title="Housy")
@@ -28,6 +28,10 @@ def health():
 def chat(body: ChatIn):
     """Local stand-in for WhatsApp. The phone identifies the person; the household is
     derived from it (never from the message), so data stays isolated per household."""
+    joined = invites.maybe_redeem(body.message, body.phone)
+    if joined:
+        hid, inviter = joined
+        return {"reply": f"Joined {inviter}'s household ({hid}).", "household_id": hid}
     household_id = identity.resolve_or_create_household(body.phone)
     reply = brain.reply_to(body.message, household_id=household_id, speaker_phone=body.phone)
     return {"reply": reply, "household_id": household_id}
@@ -36,6 +40,24 @@ def chat(body: ChatIn):
 def _process_whatsapp(from_phone: str, body: str) -> None:
     """Heavy work (Gemini loop + sends) — runs in a BackgroundTask so the webhook can
     200 immediately and we never hit Twilio's timeout."""
+    # A partner joining via invite code is handled before the brain (it changes which
+    # household this phone belongs to).
+    joined = invites.maybe_redeem(body, from_phone)
+    if joined:
+        hid, inviter = joined
+        msg = (f"🎉 You've joined {inviter}'s Housy household! You now share meal plans, "
+               f"grocery lists and spending. What's your name?")
+        store.append_turn(hid, {"speaker": from_phone, "channel": "whatsapp", "text": body})
+        store.append_turn(hid, {"speaker": "housy", "channel": "whatsapp", "text": msg})
+        whatsapp.send_message(from_phone, msg)
+        partner = identity.other_member_phone(hid, from_phone)
+        if partner:
+            try:
+                whatsapp.send_message(partner, "Housy: Your partner just joined your household 🎉")
+            except Exception:
+                pass
+        return
+
     household_id = identity.resolve_or_create_household(from_phone)
     result = brain.run_turn(body, household_id=household_id, speaker_phone=from_phone)
     whatsapp.send_message(from_phone, result["text"])

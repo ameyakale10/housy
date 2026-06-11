@@ -12,7 +12,7 @@ from typing import Callable, Dict, List
 
 from google.genai import types
 
-from app import identity, store
+from app import identity, invites, store
 from app.models import Profile
 
 # Categories used to group a grocery list.
@@ -44,6 +44,14 @@ def _declarations() -> List[types.FunctionDeclaration]:
             description="Save the name of the person you are CURRENTLY talking to. "
             "Call this as soon as they tell you their name. Never guess a name.",
             parameters=_obj({"name": _str("The person's first name")}, ["name"]),
+        ),
+        types.FunctionDeclaration(
+            name="create_household_invite",
+            description="Generate an invite code so the speaker's PARTNER can join this "
+            "household and share meal plans, lists and spending. Call this when a member "
+            "asks to add their partner/spouse. Then tell them the code and that their "
+            "partner should text that code to Housy from their own phone to join.",
+            parameters=_obj({}),
         ),
         types.FunctionDeclaration(
             name="save_profile",
@@ -145,6 +153,13 @@ def build_dispatch(household_id: str, speaker_phone: str, wrote: List[str]) -> D
         wrote.append("set_speaker_name")
         return {"ok": True, "saved_name": name}
 
+    def create_household_invite(**_):
+        code = invites.create_invite(household_id, speaker_phone)
+        if not code:
+            return {"ok": False, "error": "only an existing household member can invite"}
+        return {"ok": True, "code": code, "expires_minutes": 15,
+                "instructions": "Your partner should text this code to Housy from their own phone."}
+
     def save_profile(**fields):
         existing = store.read_profile(household_id) or {"household_id": household_id}
         merged = dict(existing)
@@ -243,6 +258,7 @@ def build_dispatch(household_id: str, speaker_phone: str, wrote: List[str]) -> D
 
     return {
         "set_speaker_name": set_speaker_name,
+        "create_household_invite": create_household_invite,
         "save_profile": save_profile,
         "save_meal_plan": save_meal_plan,
         "save_grocery_list": save_grocery_list,
