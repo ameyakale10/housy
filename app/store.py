@@ -184,3 +184,23 @@ def set_current_list(household_id: str, list_id: str) -> None:
 def current_list_id(household_id: str) -> Optional[str]:
     state = _read_json(_hid_dir(household_id) / "state.json") or {}
     return state.get("current_list_id")
+
+
+# ── inbound idempotency (dedup Twilio retries) ────────────────────────────
+def claim_sid(sid: str) -> bool:
+    """Atomically claim a Twilio message SID. Returns True if newly seen (process it),
+    False if it's a duplicate retry (skip)."""
+    with household_lock("__sids__"):
+        path = DATA_DIR / "processed-sids.json"
+        data = _read_json(path) or {"sids": []}
+        if sid in data["sids"]:
+            return False
+        data["sids"] = (data["sids"] + [sid])[-500:]  # keep the last 500
+        _write_json(path, data)
+        return True
+
+
+def all_phone_household_pairs() -> list:
+    """Every (phone, household_id) mapping — used to fan out the weekly nudge."""
+    index = _read_json(DATA_DIR / "households" / "index.json") or {}
+    return list(index.items())

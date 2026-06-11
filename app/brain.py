@@ -133,10 +133,11 @@ def _update_summary(client, household_id: str) -> None:
         pass  # best-effort by design
 
 
-def reply_to(message: str,
+def run_turn(message: str,
              household_id: str = config.DEFAULT_HOUSEHOLD_ID,
-             speaker_phone: str = "local-test") -> str:
-    """Generate Housy's reply to one message, persisting state via tools."""
+             speaker_phone: str = "local-test") -> dict:
+    """Run one conversation turn: reply + persist state. Returns the reply text, what
+    was written (for the cross-partner relay), and the speaker's display name."""
     client = _get_client()
     speaker_name = identity.member_name(household_id, speaker_phone)
     speaker_label = speaker_name or "Unknown"
@@ -171,4 +172,11 @@ def reply_to(message: str,
     store.append_turn(household_id, {"ts": _now(), "speaker": "housy", "channel": "chat", "text": reply_text})
     if wrote:
         _update_summary(client, household_id)
-    return reply_text
+    return {"text": reply_text, "wrote": wrote, "speaker": speaker_name or speaker_label}
+
+
+def reply_to(message: str,
+             household_id: str = config.DEFAULT_HOUSEHOLD_ID,
+             speaker_phone: str = "local-test") -> str:
+    """Convenience wrapper returning just the reply text."""
+    return run_turn(message, household_id, speaker_phone)["text"]

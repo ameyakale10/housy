@@ -61,6 +61,16 @@ def member_name(household_id: str, phone: str):
     return None
 
 
+def other_member_phone(household_id: str, phone: str):
+    """The partner's phone in this household (the other member with a phone), or None."""
+    prof = store.read_profile(household_id) or {}
+    for m in prof.get("members", []):
+        p = m.get("phone")
+        if p and p != phone:
+            return p
+    return None
+
+
 def set_member_name(household_id: str, phone: str, name: str) -> None:
     """Save the speaker's name on their member record (keyed by phone)."""
     prof = store.read_profile(household_id) or Profile(household_id=household_id).model_dump()

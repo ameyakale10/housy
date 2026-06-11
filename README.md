@@ -40,8 +40,20 @@ This is the product service. The agent's data/memory model lives in
    ```
 
 ## Roadmap
-- [x] Slice 0 — data model + meal-planning logic
-- [x] Slice 1 — brain over HTTP (this)
-- [ ] Slice 2 — WhatsApp channel (Twilio) → same brain
-- [ ] Slice 3 — Housy writes plans/lists/bills into the data model
-- [ ] Slice 4 — persistent DB + hosting
+- [x] M0 — JSON store + Pydantic models + atomic per-household lock
+- [x] M1 — stateful tool-calling brain, identity guardrails, memory
+- [x] M2 — WhatsApp loop (Twilio): webhook + signature verify + SID dedup +
+  cross-partner relay + weekly-nudge endpoint *(code done; needs Twilio creds to go live)*
+- [ ] M3 — dogfood for a real week over WhatsApp
+- [ ] M4 — Firestore + Cloud Run
+- [ ] M5 — receipt OCR + budgeting
+
+## Going live on WhatsApp (M2)
+1. Twilio account (free trial) → copy Account SID + Auth Token into `.env`.
+2. Activate the WhatsApp Sandbox; join it from your phone (send the join code to the
+   sandbox number).
+3. Expose the local server: `ngrok http 8000`; put the https URL in `.env` as
+   `PUBLIC_BASE_URL`.
+4. In Twilio, set the sandbox "When a message comes in" webhook to
+   `https://<ngrok>/webhook/whatsapp` (HTTP POST).
+5. `uvicorn app.main:app --reload`, then message the sandbox number from WhatsApp.
