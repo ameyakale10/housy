@@ -32,6 +32,8 @@ class Profile(BaseModel):
     allergies: List[str] = Field(default_factory=list)
     dislikes: List[str] = Field(default_factory=list)
     weekly_budget: Optional[str] = None
+    location: Optional[str] = None        # city/area — drives currency + nearby stores
+    currency: Optional[str] = None        # inferred from location, e.g. "INR"
     weeknight_time: Optional[str] = None
     weekend_time: Optional[str] = None
     equipment: List[str] = Field(default_factory=list)
@@ -40,7 +42,7 @@ class Profile(BaseModel):
 
     # The onboarding gate: these must be non-empty before status may flip.
     REQUIRED_FOR_ONBOARDING: ClassVar[tuple] = (
-        "cuisines", "staples", "diet_type", "weekly_budget",
+        "cuisines", "staples", "diet_type", "weekly_budget", "location",
     )
 
     def missing_required(self) -> List[str]:

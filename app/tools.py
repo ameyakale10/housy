@@ -49,8 +49,10 @@ def _declarations() -> List[types.FunctionDeclaration]:
             name="save_profile",
             description="Save or update the household's food preferences. Call whenever "
             "the couple shares any preference. Include ONLY the fields you actually "
-            "learned in this conversation; omit the rest. Status flips to 'onboarded' "
-            "automatically once cuisines, staples, diet_type and weekly_budget are set.",
+            "learned in this conversation; omit the rest. When you learn their location, "
+            "ALSO set `currency` by inferring it from that location (e.g. India -> INR, "
+            "USA -> USD). Status flips to 'onboarded' once cuisines, staples, diet_type, "
+            "weekly_budget and location are set.",
             parameters=_obj({
                 "cuisines": _arr_str("Primary cuisines, e.g. ['Indian']"),
                 "staples": _arr_str("Daily staples, e.g. ['rice','roti']"),
@@ -59,6 +61,8 @@ def _declarations() -> List[types.FunctionDeclaration]:
                 "dislikes": _arr_str("Foods to avoid when possible"),
                 "spice_level": _str("mild | medium | hot"),
                 "weekly_budget": _str("Rough weekly grocery budget"),
+                "location": _str("Their city/area, e.g. 'Pune, India' — for currency + nearby stores"),
+                "currency": _str("Currency code inferred from location, e.g. INR, USD"),
                 "weeknight_time": _str("Realistic weeknight cooking time"),
                 "equipment": _arr_str("Notable kitchen equipment"),
             }),
@@ -221,6 +225,8 @@ def build_dispatch(household_id: str, speaker_phone: str, wrote: List[str]) -> D
         return {"ok": updated is not None, "items": len((updated or {}).get("items", []))}
 
     def log_spend(amount=None, store_name: str = "", currency: str = "", date: str = "", **_):
+        if not currency:  # fall back to the household's location-derived currency
+            currency = (store.read_profile(household_id) or {}).get("currency", "") or ""
         bill = {
             "bill_id": _gen_id("bill"),
             "household_id": household_id,

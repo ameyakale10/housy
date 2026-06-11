@@ -15,9 +15,11 @@ def test_save_profile_onboarding_gate(tmp_path, monkeypatch):
     assert r["status"] == "not-onboarded"
     assert "save_profile" in wrote
 
-    r = d["save_profile"](staples=["rice"], diet_type="vegetarian", weekly_budget="3000")
+    r = d["save_profile"](staples=["rice"], diet_type="vegetarian", weekly_budget="3000",
+                          location="Pune, India", currency="INR")
     assert r["status"] == "onboarded"                    # gate satisfied
     assert store.read_profile(h)["status"] == "onboarded"
+    assert store.read_profile(h)["currency"] == "INR"
 
 
 def test_set_speaker_name(tmp_path, monkeypatch):
