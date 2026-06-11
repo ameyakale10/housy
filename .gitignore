@@ -1,0 +1,18 @@
+# Secrets — never commit
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Runtime store — personal data (profiles, lists, bills, memory). Not committed.
+data/
+
+# Claude Code machine-local settings
+.claude/settings.local.json
+
+# OS
+.DS_Store
