@@ -37,9 +37,25 @@ def chat(body: ChatIn):
     return {"reply": reply, "household_id": household_id}
 
 
-def _process_whatsapp(from_phone: str, body: str) -> None:
+def _process_whatsapp(from_phone: str, body: str, media_url: str = None, media_type: str = None) -> None:
     """Heavy work (Gemini loop + sends) — runs in a BackgroundTask so the webhook can
     200 immediately and we never hit Twilio's timeout."""
+    # Voice notes: transcribe to text and proceed. Other media (images) isn't supported
+    # yet (receipt OCR is a later milestone).
+    if media_url:
+        if (media_type or "").startswith("audio"):
+            try:
+                audio, ctype = whatsapp.download_media(media_url)
+                body = brain.transcribe(audio, ctype or media_type) or body
+            except Exception:
+                pass
+            if not body:
+                whatsapp.send_message(from_phone, "Sorry, I couldn't make out that voice note — mind typing it or resending? 🙂")
+                return
+        else:
+            whatsapp.send_message(from_phone, "I can't read photos or files yet (receipts are coming!). For now, please type or send a voice note 🙂")
+            return
+
     # A partner joining via invite code is handled before the brain (it changes which
     # household this phone belongs to).
     joined = invites.maybe_redeem(body, from_phone)
@@ -88,8 +104,11 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
 
     from_phone = whatsapp.strip_prefix(params.get("From", ""))
     body = params.get("Body", "")
-    if from_phone and body:
-        background_tasks.add_task(_process_whatsapp, from_phone, body)
+    num_media = int(params.get("NumMedia", "0") or 0)
+    media_url = params.get("MediaUrl0") if num_media else None
+    media_type = params.get("MediaContentType0") if num_media else None
+    if from_phone and (body or media_url):
+        background_tasks.add_task(_process_whatsapp, from_phone, body, media_url, media_type)
     return Response(status_code=200)
 
 

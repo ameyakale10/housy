@@ -47,6 +47,20 @@ def _now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
+def transcribe(audio_bytes: bytes, mime_type: str = "audio/ogg") -> str:
+    """Transcribe a voice note with Gemini (multimodal) — no separate speech service."""
+    client = _get_client()
+    resp = client.models.generate_content(
+        model=config.MODEL,
+        contents=[
+            types.Part.from_bytes(data=audio_bytes, mime_type=mime_type or "audio/ogg"),
+            types.Part.from_text(text="Transcribe this voice note verbatim. Return only the transcript text."),
+        ],
+        config=types.GenerateContentConfig(temperature=0.0),
+    )
+    return (resp.text or "").strip()
+
+
 def _system_prompt(household_id: str, speaker_name) -> str:
     profile = store.read_profile(household_id)
     memory = store.read_memory_summary(household_id) or "(no memory yet)"

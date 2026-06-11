@@ -59,7 +59,7 @@ def test_webhook_accepts_valid_signature_and_dedups(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "TWILIO_AUTH_TOKEN", TOKEN)
     monkeypatch.setattr(config, "PUBLIC_BASE_URL", "")
     calls = []
-    monkeypatch.setattr(main, "_process_whatsapp", lambda p, b: calls.append((p, b)))
+    monkeypatch.setattr(main, "_process_whatsapp", lambda *a: calls.append(a))
 
     client = TestClient(main.app)
     params = _form()
@@ -69,7 +69,25 @@ def test_webhook_accepts_valid_signature_and_dedups(tmp_path, monkeypatch):
     r1 = client.post("/webhook/whatsapp", data=params, headers=headers)
     r2 = client.post("/webhook/whatsapp", data=params, headers=headers)  # duplicate SID
     assert r1.status_code == 200 and r2.status_code == 200
-    assert calls == [("+15551230000", "hi")]  # processed exactly once
+    assert calls == [("+15551230000", "hi", None, None)]  # processed exactly once
+
+
+def test_webhook_routes_voice_note(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "TWILIO_AUTH_TOKEN", TOKEN)
+    monkeypatch.setattr(config, "PUBLIC_BASE_URL", "")
+    calls = []
+    monkeypatch.setattr(main, "_process_whatsapp", lambda *a: calls.append(a))
+    client = TestClient(main.app)
+    params = {
+        "From": "whatsapp:+15551230000", "Body": "", "MessageSid": "SMvoice",
+        "NumMedia": "1", "MediaUrl0": "https://api.twilio.com/x/Media/ME1",
+        "MediaContentType0": "audio/ogg",
+    }
+    sig = RequestValidator(TOKEN).compute_signature(URL, params)
+    r = client.post("/webhook/whatsapp", data=params, headers={"X-Twilio-Signature": sig})
+    assert r.status_code == 200
+    assert calls == [("+15551230000", "", "https://api.twilio.com/x/Media/ME1", "audio/ogg")]
 
 
 def test_weekly_nudge_requires_token(monkeypatch):

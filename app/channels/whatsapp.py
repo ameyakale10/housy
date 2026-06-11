@@ -8,6 +8,7 @@ relays) must be a pre-approved WhatsApp **template** when the recipient is outsi
 24h window. In the Twilio sandbox during dogfooding both partners are active, so free-form
 sends work; production must switch these to templates.
 """
+import httpx
 from twilio.request_validator import RequestValidator
 from twilio.rest import Client
 
@@ -47,6 +48,19 @@ def send_message(to_phone: str, body: str) -> None:
         to=f"{_WHATSAPP_PREFIX}{to_phone}",
         body=body,
     )
+
+
+def download_media(url: str):
+    """Fetch Twilio media bytes (authenticated; follows the redirect to S3).
+    Returns (bytes, content_type). Used for inbound voice notes."""
+    r = httpx.get(
+        url,
+        auth=(config.TWILIO_ACCOUNT_SID, config.TWILIO_AUTH_TOKEN),
+        follow_redirects=True,
+        timeout=30.0,
+    )
+    r.raise_for_status()
+    return r.content, r.headers.get("content-type", "")
 
 
 def build_relay(speaker_name, wrote) -> str:
