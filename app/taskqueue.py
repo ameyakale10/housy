@@ -48,6 +48,11 @@ def verify_oidc(authorization_header: str) -> bool:
         )
     except Exception:  # noqa: BLE001 — any verification failure = reject
         return False
-    if config.TASKS_SERVICE_ACCOUNT and claims.get("email") != config.TASKS_SERVICE_ACCOUNT:
+    # Fail CLOSED: require the expected service account to be configured AND to match the
+    # token's email, and require the email to be verified. The previous version skipped the
+    # SA check when the env var was unset (a misconfig would accept any Google token) and
+    # defaulted email_verified to True when the claim was absent (accepting an unverified
+    # identity). Both now reject instead.
+    if not config.TASKS_SERVICE_ACCOUNT or claims.get("email") != config.TASKS_SERVICE_ACCOUNT:
         return False
-    return bool(claims.get("email_verified", True))
+    return claims.get("email_verified") in (True, "true")

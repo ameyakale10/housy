@@ -158,7 +158,9 @@ def test_webhook_routes_voice_note(tmp_path, monkeypatch):
 def test_weekly_nudge_requires_token(monkeypatch):
     monkeypatch.setattr(config, "NUDGE_TOKEN", "secret")
     client = TestClient(main.app)
-    assert client.post("/tasks/weekly-nudge", params={"token": "wrong"}).status_code == 403
+    # wrong token in the header is rejected; a token in the URL is ignored (header-only now)
+    assert client.post("/tasks/weekly-nudge", headers={"X-Nudge-Token": "wrong"}).status_code == 403
+    assert client.post("/tasks/weekly-nudge", params={"token": "secret"}).status_code == 403
 
 
 def test_weekly_nudge_fans_out_to_all_phones(tmp_path, monkeypatch):
@@ -170,6 +172,6 @@ def test_weekly_nudge_fans_out_to_all_phones(tmp_path, monkeypatch):
     sent = []
     monkeypatch.setattr(whatsapp, "send_message", lambda to, body: sent.append(to))
     client = TestClient(main.app)
-    r = client.post("/tasks/weekly-nudge", params={"token": "secret"})
+    r = client.post("/tasks/weekly-nudge", headers={"X-Nudge-Token": "secret"})
     assert r.status_code == 200 and r.json()["sent"] == 2
     assert set(sent) == {"+111", "+222"}

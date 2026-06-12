@@ -199,9 +199,11 @@ async def process_task(request: Request):
 
 
 @app.post("/tasks/weekly-nudge")
-def weekly_nudge(token: str = ""):
+def weekly_nudge(request: Request):
     """Hit by an external cron once a week. In production the nudge MUST be a registered
-    WhatsApp template (24h-window rule)."""
+    WhatsApp template (24h-window rule). The shared secret travels in a HEADER, not the URL
+    query string — query strings get written to access logs, so a URL token leaks."""
+    token = request.headers.get("X-Nudge-Token", "")
     if not config.NUDGE_TOKEN or not hmac.compare_digest(token, config.NUDGE_TOKEN):
         raise HTTPException(status_code=403, detail="bad nudge token")
     sent = 0
