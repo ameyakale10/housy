@@ -14,5 +14,8 @@ data/
 # Claude Code machine-local settings
 .claude/settings.local.json
 
+# Personal knowledge doc — plain-English explainer, not for the repo
+KNOWLEDGE.md
+
 # OS
 .DS_Store
