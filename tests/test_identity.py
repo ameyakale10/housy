@@ -28,3 +28,21 @@ def test_member_name_set_and_get(tmp_path, monkeypatch):
     assert identity.member_name(h, "+111") is None  # not guessed
     identity.set_member_name(h, "+111", "Ameya")
     assert identity.member_name(h, "+111") == "Ameya"
+
+
+def test_remove_from_household_keeps_household_with_remaining_members(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "DATA_DIR", tmp_path)
+    h = identity.resolve_or_create_household("+111")
+    identity.link_phone("+222", h)  # two members now
+    identity.remove_from_household("+111", h)
+    prof = store.read_profile(h)
+    assert prof is not None  # household survives (a member with a phone remains)
+    phones = [m.get("phone") for m in prof["members"]]
+    assert "+111" not in phones and "+222" in phones  # only the one dropped
+
+
+def test_remove_from_household_deletes_when_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "DATA_DIR", tmp_path)
+    h = identity.resolve_or_create_household("+111")  # solo household
+    identity.remove_from_household("+111", h)
+    assert store.read_profile(h) is None  # no members left -> household removed

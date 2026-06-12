@@ -127,12 +127,14 @@ def _handle_inbound(from_phone: str, body: str, media_url: str, media_type: str)
             store.append_turn(hid, {"speaker": from_phone, "channel": "whatsapp", "text": body})
             store.append_turn(hid, {"speaker": "housy", "channel": "whatsapp", "text": msg})
             whatsapp.send_message(from_phone, msg)
-            partner = identity.other_member_phone(hid, from_phone)
-            if partner:
-                try:
+            # Post-send: must not raise (a throw here re-runs an already-consumed redeem on
+            # retry, so the joiner would get an "invalid code" error for a join that worked).
+            try:
+                partner = identity.other_member_phone(hid, from_phone)
+                if partner:
                     whatsapp.send_message(partner, "Housy: Your partner just joined your household 🎉")
-                except Exception:
-                    pass
+            except Exception:
+                logger.exception("partner-join relay failed for %s (joiner already notified)", from_phone)
         else:
             whatsapp.send_message(from_phone, _INVITE_FAIL.get(inv["reason"], _INVITE_FAIL["invalid"]))
         return
@@ -141,25 +143,30 @@ def _handle_inbound(from_phone: str, body: str, media_url: str, media_type: str)
     result = brain.run_turn(body, household_id=household_id, speaker_phone=from_phone)
     whatsapp.send_message(from_phone, result["text"])
 
-    # Cross-partner relay: tell the other partner what changed AND share the content.
-    partner = identity.other_member_phone(household_id, from_phone)
-    if partner:
-        wrote = result.get("wrote", [])
-        relay = whatsapp.build_relay(result.get("speaker"), wrote)
-        if relay:
-            msg = f"Housy: {relay}"
-            if any(w in wrote for w in ("save_meal_plan", "save_grocery_list", "update_grocery_list")):
-                content = present.plan_and_list(household_id)
-                if content:
-                    msg += "\n\n" + content
-            try:
-                whatsapp.send_message(partner, msg)
-            except Exception:
-                pass  # delivery can fail outside the 24h window; non-fatal
+    # EVERYTHING below runs AFTER the user's reply is out the door, so it must never
+    # raise: on the Cloud Tasks path an exception here would release the SID and return
+    # 500, making the queue retry and DOUBLE-SEND the reply (and re-run the LLM, dup'ing
+    # saved plans/lists). One best-effort guard around the whole tail enforces the
+    # "nothing throws after the send" invariant the retry-safety design depends on.
+    try:
+        # Cross-partner relay: tell the other partner what changed AND share the content.
+        partner = identity.other_member_phone(household_id, from_phone)
+        if partner:
+            wrote = result.get("wrote", [])
+            relay = whatsapp.build_relay(result.get("speaker"), wrote)
+            if relay:
+                msg = f"Housy: {relay}"
+                if any(w in wrote for w in ("save_meal_plan", "save_grocery_list", "update_grocery_list")):
+                    content = present.plan_and_list(household_id)
+                    if content:
+                        msg += "\n\n" + content
+                whatsapp.send_message(partner, msg)  # can fail outside the 24h window; non-fatal
 
-    # Refresh long-term memory LAST — after both replies are out the door — so the slow
-    # second Gemini call never delays what the couple sees. Best-effort by design.
-    brain.maybe_update_summary(household_id, result.get("wrote"))
+        # Refresh long-term memory LAST — after both replies are sent — so the slow second
+        # Gemini call never delays what the couple sees.
+        brain.maybe_update_summary(household_id, result.get("wrote"))
+    except Exception:
+        logger.exception("post-reply tail failed for %s (reply already sent)", from_phone)
 
 
 @app.post("/webhook/whatsapp")

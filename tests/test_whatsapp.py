@@ -121,6 +121,22 @@ def test_release_sid_allows_reprocess(tmp_path, monkeypatch):
     assert store.claim_sid("SMr") is True            # reclaimable after release
 
 
+def test_local_failure_apologizes_and_releases_sid(tmp_path, monkeypatch):
+    """BackgroundTask path (raise_on_error=False): on failure it must NOT raise, must
+    apologize to the user, and must release the SID (no queue to retry locally)."""
+    monkeypatch.setattr(store, "DATA_DIR", tmp_path)
+
+    def boom(*a):
+        raise RuntimeError("brain down")
+
+    sent = []
+    monkeypatch.setattr(main, "_handle_inbound", boom)
+    monkeypatch.setattr(whatsapp, "send_message", lambda to, body: sent.append((to, body)))
+    main._process_whatsapp("+1", "hi", None, None, "SMlocal")  # raise_on_error defaults False
+    assert sent and "went wrong" in sent[0][1]            # apology delivered
+    assert store.claim_sid("SMlocal") is True             # SID released -> reclaimable
+
+
 def test_worker_retries_on_failure(tmp_path, monkeypatch):
     """A failed turn must return 500 (so Cloud Tasks retries) AND release the SID, so the
     retry re-processes instead of being deduped away as 'already handled'."""

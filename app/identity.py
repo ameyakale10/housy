@@ -80,13 +80,18 @@ def other_member_phone(household_id: str, phone: str):
 
 
 def set_member_name(household_id: str, phone: str, name: str) -> None:
-    """Save the speaker's name on their member record (keyed by phone)."""
-    prof = store.read_profile(household_id) or Profile(household_id=household_id).model_dump()
-    members = prof.setdefault("members", [])
-    for m in members:
-        if m.get("phone") == phone:
-            m["name"] = name
-            break
-    else:
-        members.append({"name": name, "phone": phone, "role": ""})
-    store.write_profile(household_id, prof)
+    """Save the speaker's name on their member record (keyed by phone), ATOMICALLY — so a
+    concurrent link_phone (partner joining) can't be clobbered by this write, which would
+    silently drop the just-added member."""
+
+    def _set(prof):
+        members = prof.setdefault("members", [])
+        for m in members:
+            if m.get("phone") == phone:
+                m["name"] = name
+                break
+        else:
+            members.append({"name": name, "phone": phone, "role": ""})
+        return prof
+
+    store.update_profile(household_id, _set)

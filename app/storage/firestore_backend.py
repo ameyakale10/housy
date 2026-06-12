@@ -11,12 +11,13 @@ Data model:
   households/{hid}/bills/{bill_id}
   households/{hid}/messages/{auto}       {**turn, _ts: server_timestamp}
   phone_index/{phone}                    {household_id}
-  invites/{code}                         {household_id, by, expires}
+  invites/{code}                         {household_id, by, expires, expire_at}  (TTL on expire_at)
   redeem_attempts/{phone}                {attempts: [..]}
-  processed_sids/{sid}                   {_ts}
+  processed_sids/{sid}                   {_ts, expire_at}                        (TTL on expire_at)
   meta/counters                          {households: int}
 """
 import contextlib
+import datetime
 from typing import Callable, List, Optional
 
 from google.api_core import exceptions as gexc
@@ -26,6 +27,18 @@ from app import config
 from app.config import DEFAULT_HOUSEHOLD_ID
 
 _client = None
+
+# Every subcollection under a household doc. Single source of truth so delete_household
+# (and test cleanup) can't drift and leak data when a new subcollection is added.
+_SUBCOLLECTIONS = ("meal_plans", "grocery_lists", "bills", "messages")
+
+# How long a SID-dedup marker lives before Firestore TTL reaps it. Only needs to outlast
+# Twilio's retry window (hours); 7 days is a generous margin.
+_SID_TTL_DAYS = 7
+
+
+def _utcnow() -> datetime.datetime:
+    return datetime.datetime.now(datetime.timezone.utc)
 
 
 def _db() -> firestore.Client:
@@ -233,7 +246,7 @@ def delete_household(household_id: str) -> None:
     Firestore). Used to clean up an orphaned solo household after its only member joins
     their partner's household."""
     hh = _hh(household_id)
-    for sub in ("meal_plans", "grocery_lists", "bills", "messages"):
+    for sub in _SUBCOLLECTIONS:
         for d in hh.collection(sub).stream():
             d.reference.delete()
     hh.delete()
@@ -246,9 +259,14 @@ def all_phone_household_pairs() -> list:
 
 # ── invites + redeem attempts ─────────────────────────────────────────────
 def put_invite(code: str, data: dict, now: float) -> None:
-    # Expired invites are cleaned by a Firestore TTL policy on `expires`; redeem also
-    # re-checks expiry, so no manual pruning needed here.
-    _db().collection("invites").document(code).set(data)
+    # `expires` (a float) drives the expiry CHECK in get/consume. `expire_at` (a Timestamp,
+    # derived from it) drives the Firestore TTL policy that reaps unredeemed expired invites
+    # (TTL only works on Timestamp fields, not floats). redeem also re-checks expiry.
+    doc = dict(data)
+    exp = data.get("expires")
+    if exp:
+        doc["expire_at"] = datetime.datetime.fromtimestamp(exp, tz=datetime.timezone.utc)
+    _db().collection("invites").document(code).set(doc)
 
 
 def get_invite(code: str) -> Optional[dict]:
@@ -292,7 +310,12 @@ def record_redeem_attempt(phone: str, window: float, now: float) -> int:
 def claim_sid(sid: str) -> bool:
     ref = _db().collection("processed_sids").document(sid)
     try:
-        ref.create({"_ts": firestore.SERVER_TIMESTAMP})
+        # expire_at drives a Firestore TTL policy so these dedup markers (one per inbound
+        # message, forever otherwise) are auto-reaped after the retry window passes.
+        ref.create({
+            "_ts": firestore.SERVER_TIMESTAMP,
+            "expire_at": _utcnow() + datetime.timedelta(days=_SID_TTL_DAYS),
+        })
         return True
     except gexc.AlreadyExists:
         return False
