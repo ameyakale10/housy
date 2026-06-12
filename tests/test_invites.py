@@ -38,7 +38,7 @@ def test_redeem_links_and_is_single_use(tmp_path, monkeypatch):
 def test_redeem_expired(tmp_path, monkeypatch):
     h = _household(tmp_path, monkeypatch)
     code = invites.create_invite(h, "+111")
-    monkeypatch.setattr(invites, "_now", lambda: time.time() + 10_000)  # jump past TTL
+    monkeypatch.setattr(invites, "_now", lambda: time.time() + invites.TTL_SECONDS + 1000)
     assert invites.redeem(code, "+222") is None
 
 

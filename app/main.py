@@ -74,6 +74,16 @@ def _process_whatsapp(from_phone: str, body: str, media_url: str = None, media_t
                 pass
         return
 
+    # Looked like an invite code but didn't redeem (expired/unknown) — say so clearly
+    # instead of letting the brain guess.
+    if invites.extract_code(body):
+        whatsapp.send_message(
+            from_phone,
+            "That invite code is invalid or has expired. Ask your partner to send a fresh "
+            'one by texting Housy "add my partner".',
+        )
+        return
+
     household_id = identity.resolve_or_create_household(from_phone)
     result = brain.run_turn(body, household_id=household_id, speaker_phone=from_phone)
     whatsapp.send_message(from_phone, result["text"])

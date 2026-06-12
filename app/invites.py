@@ -11,7 +11,7 @@ import secrets
 
 from app import identity, store
 
-TTL_SECONDS = 15 * 60
+TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days — real couples don't coordinate in 15 minutes
 _INVITES_PATH = ("households", "invites.json")
 _CODE_RE = re.compile(r"HOUSY-?(\d{4})", re.IGNORECASE)
 
