@@ -255,5 +255,84 @@ def claim_sid(sid: str) -> bool:
 
 def all_phone_household_pairs() -> list:
     """Every (phone, household_id) mapping — used to fan out the weekly nudge."""
-    index = _read_json(DATA_DIR / "households" / "index.json") or {}
+    index = _read_json(_index_path()) or {}
     return list(index.items())
+
+
+# ── phone → household index (used by identity) ────────────────────────────
+def _index_path() -> Path:
+    return DATA_DIR / "households" / "index.json"
+
+
+def get_household_for_phone(phone: str) -> Optional[str]:
+    return (_read_json(_index_path()) or {}).get(phone)
+
+
+def get_or_create_household(phone: str) -> str:
+    """Atomically return this phone's household, or allocate a fresh isolated one."""
+    with household_lock("__index__"):
+        index = _read_json(_index_path()) or {}
+        hid = index.get(phone)
+        if hid:
+            return hid
+        taken = set(index.values())
+        n = 1
+        while f"h{n}" in taken:
+            n += 1
+        hid = f"h{n}"
+        index[phone] = hid
+        _write_json(_index_path(), index)
+        return hid
+
+
+def map_phone(phone: str, household_id: str) -> None:
+    """Atomically point a phone at a household (used to join a partner)."""
+    with household_lock("__index__"):
+        index = _read_json(_index_path()) or {}
+        index[phone] = household_id
+        _write_json(_index_path(), index)
+
+
+# ── invites + redeem attempts (used by invites) ───────────────────────────
+def _invites_path() -> Path:
+    return DATA_DIR / "households" / "invites.json"
+
+
+def _attempts_path() -> Path:
+    return DATA_DIR / "households" / "redeem_attempts.json"
+
+
+def put_invite(code: str, data: dict, now: float) -> None:
+    """Store an invite, pruning any expired ones first."""
+    with household_lock("__invites__"):
+        live = {k: v for k, v in (_read_json(_invites_path()) or {}).items()
+                if v.get("expires", 0) > now}
+        live[code] = data
+        _write_json(_invites_path(), live)
+
+
+def get_invite(code: str) -> Optional[dict]:
+    return (_read_json(_invites_path()) or {}).get(code)
+
+
+def consume_invite(code: str, now: float) -> Optional[dict]:
+    """Atomically remove and return an invite if present and unexpired (single-use)."""
+    with household_lock("__invites__"):
+        invites = _read_json(_invites_path()) or {}
+        inv = invites.get(code)
+        if not inv or inv.get("expires", 0) <= now:
+            return None
+        del invites[code]
+        _write_json(_invites_path(), invites)
+        return inv
+
+
+def record_redeem_attempt(phone: str, window: float, now: float) -> int:
+    """Record a redeem attempt; return how many attempts are in the current window."""
+    with household_lock("__invites__"):
+        data = _read_json(_attempts_path()) or {}
+        attempts = [t for t in data.get(phone, []) if now - t < window]
+        attempts.append(now)
+        data[phone] = attempts[-50:]
+        _write_json(_attempts_path(), data)
+        return len(attempts)

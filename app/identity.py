@@ -19,19 +19,7 @@ def resolve_or_create_household(phone: str) -> str:
     can never land in someone else's data. Partners are joined explicitly via
     link_phone().
     """
-    index_path = store.DATA_DIR / "households" / "index.json"
-    with store.household_lock("__index__"):
-        index = store._read_json(index_path) or {}
-        hid = index.get(phone)
-        if hid:
-            return hid
-        taken = set(index.values())
-        n = 1
-        while f"h{n}" in taken:
-            n += 1
-        hid = f"h{n}"
-        index[phone] = hid
-        store._write_json(index_path, index)
+    hid = store.get_or_create_household(phone)
     # Seed a not-onboarded profile with this phone as the first member.
     if store.read_profile(hid) is None:
         store.write_profile(hid, Profile(household_id=hid, members=[Member(phone=phone)]).model_dump())
@@ -41,11 +29,7 @@ def resolve_or_create_household(phone: str) -> str:
 def link_phone(phone: str, household_id: str) -> None:
     """Map an additional phone (the partner) to an existing household so the two
     share state. Used to put both partners in the same household for the MVP."""
-    index_path = store.DATA_DIR / "households" / "index.json"
-    with store.household_lock("__index__"):
-        index = store._read_json(index_path) or {}
-        index[phone] = household_id
-        store._write_json(index_path, index)
+    store.map_phone(phone, household_id)
     prof = store.read_profile(household_id) or Profile(household_id=household_id).model_dump()
     if not any(m.get("phone") == phone for m in prof.get("members", [])):
         prof.setdefault("members", []).append({"name": "", "phone": phone, "role": ""})
