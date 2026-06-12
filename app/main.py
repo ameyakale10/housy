@@ -68,16 +68,30 @@ def chat(body: ChatIn):
 
 
 def _process_whatsapp(from_phone: str, body: str, media_url: str = None,
-                      media_type: str = None, sid: str = "") -> None:
+                      media_type: str = None, sid: str = "",
+                      raise_on_error: bool = False) -> None:
     """Process one inbound message (BackgroundTask locally, or the Cloud Tasks worker in
-    prod). Dedups on the Twilio SID so duplicate deliveries/retries run once, and never
-    lets an exception vanish silently — always replies."""
+    prod). Dedups on the Twilio SID so duplicate deliveries run once.
+
+    On failure the two callers behave differently, on purpose:
+    - Cloud Tasks worker (raise_on_error=True): release the SID claim and re-raise, so the
+      endpoint returns 500 and the queue RETRIES. Without releasing, the retry would see
+      the SID as already handled and silently drop the message — the exact bug that lost
+      messages during the Twilio outage.
+    - Local BackgroundTask (raise_on_error=False): there's no queue to retry, so apologise
+      to the user instead of leaving them hanging.
+    Reaching the failure path means the reply never went out (everything after the user
+    send is best-effort and swallowed), so a retry can't double-reply."""
     if sid and not store.claim_sid(sid):
         return  # duplicate delivery — already handled
     try:
         _handle_inbound(from_phone, body, media_url, media_type)
     except Exception:
         logger.exception("processing failed for %s", from_phone)
+        if sid:
+            store.release_sid(sid)  # let a retry re-claim and re-process
+        if raise_on_error:
+            raise  # Cloud Tasks worker -> 500 -> queue retries with backoff
         try:
             whatsapp.send_message(from_phone, "Sorry, something went wrong on my end — please try again in a moment.")
         except Exception:
@@ -176,8 +190,11 @@ async def process_task(request: Request):
     if not taskqueue.verify_oidc(request.headers.get("Authorization", "")):
         raise HTTPException(status_code=403, detail="unauthorized task")
     p = await request.json()
+    # raise_on_error=True: a genuine failure propagates as HTTP 500 so Cloud Tasks retries
+    # (the queue's durability is the whole point of routing through it).
     _process_whatsapp(p.get("from_phone", ""), p.get("body", ""),
-                      p.get("media_url"), p.get("media_type"), p.get("sid", ""))
+                      p.get("media_url"), p.get("media_type"), p.get("sid", ""),
+                      raise_on_error=True)
     return Response(status_code=200)
 
 

@@ -63,6 +63,23 @@ def write_profile(household_id: str, profile: dict) -> None:
     _hh(household_id).set({"profile": profile}, merge=True)
 
 
+def update_profile(household_id: str, mutate: Callable[[dict], dict]) -> dict:
+    """Atomic read-modify-write of the profile inside a Firestore transaction, so two
+    partners saving at the same instant can't overwrite each other's fields. `mutate`
+    must be pure — the transaction may run it more than once on contention."""
+    ref = _hh(household_id)
+
+    @firestore.transactional
+    def _txn(txn):
+        snap = ref.get(transaction=txn)
+        current = (snap.to_dict() or {}).get("profile") if snap.exists else None
+        updated = mutate(current or {"household_id": household_id})
+        txn.set(ref, {"profile": updated}, merge=True)
+        return updated
+
+    return _txn(_db().transaction())
+
+
 # ── meal plans / grocery lists / bills ────────────────────────────────────
 def save_meal_plan(household_id: str, plan: dict) -> None:
     _hh(household_id).collection("meal_plans").document(plan["plan_id"]).set(plan)
@@ -268,3 +285,9 @@ def claim_sid(sid: str) -> bool:
         return True
     except gexc.AlreadyExists:
         return False
+
+
+def release_sid(sid: str) -> None:
+    """Undo a claim so a failed message can be re-processed on retry (deleting the marker
+    lets the next attempt re-claim instead of being deduped away as 'already handled')."""
+    _db().collection("processed_sids").document(sid).delete()

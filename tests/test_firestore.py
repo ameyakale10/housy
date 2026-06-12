@@ -46,6 +46,33 @@ def test_profile_round_trip(fs):
         _cleanup_household(hid)
 
 
+def test_profile_transactional_update(fs):
+    hid = f"test-{uuid.uuid4().hex[:8]}"
+    try:
+        fs.write_profile(hid, {"household_id": hid, "cuisine": ["Indian"]})
+        fs.update_profile(hid, lambda p: {**p, "budget": 200})
+        got = fs.read_profile(hid)
+        assert got["budget"] == 200 and got["cuisine"] == ["Indian"]  # merged, not clobbered
+        # creates from nothing when no profile exists yet
+        hid2 = f"test-{uuid.uuid4().hex[:8]}"
+        fs.update_profile(hid2, lambda p: {**p, "city": "Pune"})
+        assert fs.read_profile(hid2)["city"] == "Pune"
+        _cleanup_household(hid2)
+    finally:
+        _cleanup_household(hid)
+
+
+def test_release_sid_allows_reprocess(fs):
+    sid = f"SMtest{uuid.uuid4().hex[:10]}"
+    try:
+        assert fs.claim_sid(sid) is True
+        assert fs.claim_sid(sid) is False
+        fs.release_sid(sid)
+        assert fs.claim_sid(sid) is True        # reclaimable after release
+    finally:
+        fs._db().collection("processed_sids").document(sid).delete()
+
+
 def test_grocery_transactional_update(fs):
     hid = f"test-{uuid.uuid4().hex[:8]}"
     try:

@@ -105,12 +105,36 @@ def test_worker_requires_oidc(monkeypatch):
 def test_worker_processes_with_valid_oidc(monkeypatch):
     monkeypatch.setattr(taskqueue, "verify_oidc", lambda h: True)
     got = []
-    monkeypatch.setattr(main, "_process_whatsapp", lambda *a: got.append(a))
+    monkeypatch.setattr(main, "_process_whatsapp", lambda *a, **k: got.append((a, k)))
     client = TestClient(main.app)
     r = client.post("/tasks/process", json={
         "from_phone": "+1", "body": "hi", "media_url": None, "media_type": None, "sid": "S1"})
     assert r.status_code == 200
-    assert got == [("+1", "hi", None, None, "S1")]
+    assert got == [(("+1", "hi", None, None, "S1"), {"raise_on_error": True})]
+
+
+def test_release_sid_allows_reprocess(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "DATA_DIR", tmp_path)
+    assert store.claim_sid("SMr") is True
+    assert store.claim_sid("SMr") is False          # already claimed
+    store.release_sid("SMr")
+    assert store.claim_sid("SMr") is True            # reclaimable after release
+
+
+def test_worker_retries_on_failure(tmp_path, monkeypatch):
+    """A failed turn must return 500 (so Cloud Tasks retries) AND release the SID, so the
+    retry re-processes instead of being deduped away as 'already handled'."""
+    monkeypatch.setattr(store, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(taskqueue, "verify_oidc", lambda h: True)
+
+    def boom(*a):
+        raise RuntimeError("gemini down")
+
+    monkeypatch.setattr(main, "_handle_inbound", boom)
+    client = TestClient(main.app, raise_server_exceptions=False)
+    r = client.post("/tasks/process", json={"from_phone": "+1", "body": "hi", "sid": "SMfail"})
+    assert r.status_code == 500                       # signals Cloud Tasks to retry
+    assert store.claim_sid("SMfail") is True          # SID released -> reprocessable
 
 
 def test_webhook_routes_voice_note(tmp_path, monkeypatch):

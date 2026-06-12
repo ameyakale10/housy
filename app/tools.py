@@ -173,18 +173,28 @@ def build_dispatch(household_id: str, speaker_phone: str, wrote: List[str]) -> D
                 "instructions": "Your partner should text this code to Housy from their own phone."}
 
     def save_profile(**fields):
-        existing = store.read_profile(household_id) or {"household_id": household_id}
-        merged = dict(existing)
-        for k, v in fields.items():
-            if v not in (None, "", []):
-                merged[k] = v
-        merged["household_id"] = household_id
-        p = Profile(**merged)
-        if p.is_ready_to_onboard():
-            p.status = "onboarded"
-        store.write_profile(household_id, p.model_dump())
+        # Read-modify-write the profile ATOMICALLY so two partners onboarding at the same
+        # instant can't clobber each other's fields. The merge logic lives inside the
+        # closure, which the storage layer runs under a lock (files) or in a transaction
+        # (Firestore); the transaction may re-run it on contention, so it stays pure.
+        out = {}
+
+        def _apply(existing):
+            merged = dict(existing)
+            for k, v in fields.items():
+                if v not in (None, "", []):
+                    merged[k] = v
+            merged["household_id"] = household_id
+            p = Profile(**merged)
+            if p.is_ready_to_onboard():
+                p.status = "onboarded"
+            out["status"] = p.status
+            out["still_missing"] = p.missing_required()
+            return p.model_dump()
+
+        store.update_profile(household_id, _apply)
         wrote.append("save_profile")
-        return {"ok": True, "status": p.status, "still_missing": p.missing_required()}
+        return {"ok": True, "status": out["status"], "still_missing": out["still_missing"]}
 
     def set_item_store(**kw):
         item = (kw.get("item") or "").strip()

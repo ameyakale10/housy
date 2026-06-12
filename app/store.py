@@ -86,6 +86,20 @@ def write_profile(household_id: str, profile: dict) -> None:
         _write_json(_hid_dir(household_id) / "profile.json", profile)
 
 
+def update_profile(household_id: str, mutate: Callable[[dict], dict]) -> dict:
+    """Atomic read-modify-write of the profile (closes the partner lost-update bug).
+
+    `mutate` receives the current profile (or a minimal stub if none exists yet) and
+    returns the updated one; the whole read->mutate->write runs under the household lock,
+    so two partners saving at the same instant can't clobber each other's fields.
+    """
+    with household_lock(household_id):
+        current = _read_json(_hid_dir(household_id) / "profile.json") or {"household_id": household_id}
+        updated = mutate(current)
+        _write_json(_hid_dir(household_id) / "profile.json", updated)
+        return updated
+
+
 # ── meal plans / grocery lists / bills ────────────────────────────────────
 def save_meal_plan(household_id: str, plan: dict) -> None:
     with household_lock(household_id):
@@ -253,6 +267,18 @@ def claim_sid(sid: str) -> bool:
         return True
 
 
+def release_sid(sid: str) -> None:
+    """Undo a claim so a failed message can be re-processed on retry. Called when
+    processing raised after the SID was claimed — without this the retry would see the
+    SID as 'already handled' and silently drop the message."""
+    with household_lock("__sids__"):
+        path = DATA_DIR / "processed-sids.json"
+        data = _read_json(path) or {"sids": []}
+        if sid in data["sids"]:
+            data["sids"] = [s for s in data["sids"] if s != sid]
+            _write_json(path, data)
+
+
 def all_phone_household_pairs() -> list:
     """Every (phone, household_id) mapping — used to fan out the weekly nudge."""
     index = _read_json(_index_path()) or {}
@@ -348,7 +374,7 @@ if _config.STORAGE_BACKEND == "firestore":
     from app.storage import firestore_backend as _fb  # noqa: E402
 
     _PUBLIC = (
-        "household_lock", "read_profile", "write_profile",
+        "household_lock", "read_profile", "write_profile", "update_profile",
         "save_meal_plan", "latest_meal_plan",
         "save_grocery_list", "read_grocery_list", "update_grocery_list", "current_grocery_list",
         "save_bill",
@@ -356,7 +382,7 @@ if _config.STORAGE_BACKEND == "firestore":
         "resolve_household",
         "set_current_list", "current_list_id", "set_current_plan", "current_plan_id",
         "read_store_prefs", "set_store_pref",
-        "claim_sid", "all_phone_household_pairs",
+        "claim_sid", "release_sid", "all_phone_household_pairs",
         "get_household_for_phone", "get_or_create_household", "map_phone",
         "put_invite", "get_invite", "consume_invite", "record_redeem_attempt",
     )

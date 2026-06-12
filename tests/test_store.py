@@ -57,6 +57,43 @@ def test_concurrent_updates_no_lost_update(tmp_path, monkeypatch):
     assert len(items) == 20  # no lost updates
 
 
+def test_profile_atomic_update(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "DATA_DIR", tmp_path)
+    store.write_profile("h1", {"household_id": "h1", "cuisine": ["Indian"]})
+
+    def set_budget(p):
+        p["budget"] = 200
+        return p
+
+    store.update_profile("h1", set_budget)
+    got = store.read_profile("h1")
+    assert got["budget"] == 200 and got["cuisine"] == ["Indian"]  # merged, not clobbered
+
+
+def test_update_profile_creates_when_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "DATA_DIR", tmp_path)
+    store.update_profile("new", lambda p: {**p, "city": "Pune"})
+    assert store.read_profile("new") == {"household_id": "new", "city": "Pune"}
+
+
+def test_concurrent_profile_updates_no_lost_update(tmp_path, monkeypatch):
+    """Two partners each set a different field at once; the lock must keep BOTH."""
+    monkeypatch.setattr(store, "DATA_DIR", tmp_path)
+    store.write_profile("h1", {"household_id": "h1"})
+
+    def set_field(key, val):
+        store.update_profile("h1", lambda p: {**p, key: val})
+
+    threads = [threading.Thread(target=set_field, args=(f"k{i}", i)) for i in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    got = store.read_profile("h1")
+    assert all(got.get(f"k{i}") == i for i in range(20))  # no lost updates
+
+
 def test_resolve_household_defaults(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "DATA_DIR", tmp_path)
     assert store.resolve_household("+10000000000") == "h1"  # unknown → default
