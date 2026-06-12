@@ -76,7 +76,13 @@ def redeem(code: str, phone: str) -> dict:
     if not consumed:
         return {"ok": False, "reason": "invalid"}  # raced / just expired
 
-    identity.link_phone(phone, target)
+    # Carry over the name they already gave Housy in their own solo household, then tidy
+    # that now-empty household away so they don't linger in two places.
+    joiner_name = identity.member_name(current, phone) if current else None
+    identity.link_phone(phone, target, name=joiner_name)
+    if current and current != target:
+        identity.remove_from_household(phone, current)
+
     inviter = identity.member_name(target, consumed.get("by", "")) or "your partner"
     return {"ok": True, "household_id": target, "inviter": inviter}
 

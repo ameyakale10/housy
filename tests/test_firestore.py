@@ -62,6 +62,15 @@ def test_profile_transactional_update(fs):
         _cleanup_household(hid)
 
 
+def test_delete_household_removes_doc_and_subcollections(fs):
+    hid = f"test-{uuid.uuid4().hex[:8]}"
+    fs.write_profile(hid, {"household_id": hid, "members": [{"phone": "+1", "name": "X"}]})
+    fs.append_turn(hid, {"speaker": "X", "text": "hi"})   # a message subcollection doc
+    fs.delete_household(hid)
+    assert fs.read_profile(hid) is None
+    assert fs.read_history(hid) == []                     # subcollection gone too
+
+
 def test_release_sid_allows_reprocess(fs):
     sid = f"SMtest{uuid.uuid4().hex[:10]}"
     try:

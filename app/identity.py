@@ -26,13 +26,37 @@ def resolve_or_create_household(phone: str) -> str:
     return hid
 
 
-def link_phone(phone: str, household_id: str) -> None:
-    """Map an additional phone (the partner) to an existing household so the two
-    share state. Used to put both partners in the same household for the MVP."""
+def link_phone(phone: str, household_id: str, name: str = None) -> None:
+    """Map an additional phone (the partner) to an existing household so the two share
+    state. Adds them to the member list (atomically), carrying their known name if we
+    have one — so a partner who already told Housy their name isn't asked again."""
     store.map_phone(phone, household_id)
-    prof = store.read_profile(household_id) or Profile(household_id=household_id).model_dump()
-    if not any(m.get("phone") == phone for m in prof.get("members", [])):
-        prof.setdefault("members", []).append({"name": "", "phone": phone, "role": ""})
+
+    def _add(prof):
+        members = prof.setdefault("members", [])
+        for m in members:
+            if m.get("phone") == phone:
+                if name and not m.get("name"):
+                    m["name"] = name  # fill in a name we now know
+                return prof
+        members.append({"name": name or "", "phone": phone, "role": ""})
+        return prof
+
+    store.update_profile(household_id, _add)
+
+
+def remove_from_household(phone: str, household_id: str) -> None:
+    """Drop a phone from a household. If no members with a phone remain, delete the whole
+    household — this clears the orphaned solo household left behind when someone joins
+    their partner's household instead of keeping their own."""
+    prof = store.read_profile(household_id)
+    if not prof:
+        return
+    members = [m for m in prof.get("members", []) if m.get("phone") != phone]
+    if not any(m.get("phone") for m in members):
+        store.delete_household(household_id)
+    else:
+        prof["members"] = members
         store.write_profile(household_id, prof)
 
 

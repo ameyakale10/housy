@@ -117,8 +117,13 @@ def _handle_inbound(from_phone: str, body: str, media_url: str, media_type: str)
     if inv is not None:
         if inv.get("ok"):
             hid, inviter = inv["household_id"], inv["inviter"]
-            msg = (f"🎉 You've joined {inviter}'s Housy household! You now share meal plans, "
-                   f"grocery lists and spending. What's your name?")
+            joiner = identity.member_name(hid, from_phone)  # carried over if they told us already
+            if joiner:
+                msg = (f"🎉 You've joined {inviter}'s Housy household, {joiner}! You now share "
+                       f"meal plans, grocery lists and spending.")
+            else:
+                msg = (f"🎉 You've joined {inviter}'s Housy household! You now share meal plans, "
+                       f"grocery lists and spending. What's your name?")
             store.append_turn(hid, {"speaker": from_phone, "channel": "whatsapp", "text": body})
             store.append_turn(hid, {"speaker": "housy", "channel": "whatsapp", "text": msg})
             whatsapp.send_message(from_phone, msg)

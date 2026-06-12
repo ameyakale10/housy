@@ -228,6 +228,17 @@ def map_phone(phone: str, household_id: str) -> None:
     _db().collection("phone_index").document(phone).set({"household_id": household_id})
 
 
+def delete_household(household_id: str) -> None:
+    """Remove a household doc AND its subcollections (deleting a doc doesn't cascade in
+    Firestore). Used to clean up an orphaned solo household after its only member joins
+    their partner's household."""
+    hh = _hh(household_id)
+    for sub in ("meal_plans", "grocery_lists", "bills", "messages"):
+        for d in hh.collection(sub).stream():
+            d.reference.delete()
+    hh.delete()
+
+
 def all_phone_household_pairs() -> list:
     return [(snap.id, snap.to_dict().get("household_id"))
             for snap in _db().collection("phone_index").stream()]

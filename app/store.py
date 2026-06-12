@@ -22,6 +22,7 @@ rather than asyncio.Lock.
 """
 import json
 import os
+import shutil
 import threading
 from contextlib import contextmanager
 from pathlib import Path
@@ -319,6 +320,15 @@ def map_phone(phone: str, household_id: str) -> None:
         _write_json(_index_path(), index)
 
 
+def delete_household(household_id: str) -> None:
+    """Remove a household and all its data. Used to clean up an orphaned solo household
+    when its only member moves into their partner's household."""
+    with household_lock(household_id):
+        d = _hid_dir(household_id)
+        if d.exists():
+            shutil.rmtree(d)
+
+
 # ── invites + redeem attempts (used by invites) ───────────────────────────
 def _invites_path() -> Path:
     return DATA_DIR / "households" / "invites.json"
@@ -383,7 +393,7 @@ if _config.STORAGE_BACKEND == "firestore":
         "set_current_list", "current_list_id", "set_current_plan", "current_plan_id",
         "read_store_prefs", "set_store_pref",
         "claim_sid", "release_sid", "all_phone_household_pairs",
-        "get_household_for_phone", "get_or_create_household", "map_phone",
+        "get_household_for_phone", "get_or_create_household", "map_phone", "delete_household",
         "put_invite", "get_invite", "consume_invite", "record_redeem_attempt",
     )
     for _n in _PUBLIC:
