@@ -138,6 +138,10 @@ def _handle_inbound(from_phone: str, body: str, media_url: str, media_type: str)
             except Exception:
                 pass  # delivery can fail outside the 24h window; non-fatal
 
+    # Refresh long-term memory LAST — after both replies are out the door — so the slow
+    # second Gemini call never delays what the couple sees. Best-effort by design.
+    brain.maybe_update_summary(household_id, result.get("wrote"))
+
 
 @app.post("/webhook/whatsapp")
 async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):

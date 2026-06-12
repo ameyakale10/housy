@@ -220,6 +220,7 @@ def run_turn(message: str,
         system_instruction=_system_prompt(household_id, speaker_name),
         tools=[tools.gemini_tool()],
         temperature=TEMPERATURE,
+        thinking_config=types.ThinkingConfig(thinking_budget=0),  # off = much faster replies
     )
     contents = _build_contents(store.read_history(household_id, n=12), speaker_label, message)
 
@@ -249,16 +250,28 @@ def run_turn(message: str,
             if block:
                 reply_text = (reply_text + "\n\n" + block).strip()
 
-    # Persist the turn (speaker-tagged), then refresh memory if anything was saved.
+    # Persist the turn (speaker-tagged). The memory summary refresh is deliberately
+    # NOT done here — it's a second slow Gemini call that would block the reply. The
+    # caller runs maybe_update_summary() AFTER sending the reply (see app/main.py).
     store.append_turn(household_id, {"ts": _now(), "speaker": speaker_label, "channel": "chat", "text": message})
     store.append_turn(household_id, {"ts": _now(), "speaker": "housy", "channel": "chat", "text": reply_text})
-    if wrote:
-        _update_summary(client, household_id)
     return {"text": reply_text, "wrote": wrote, "speaker": speaker_name or speaker_label}
+
+
+def maybe_update_summary(household_id: str, wrote) -> None:
+    """Refresh long-term memory if this turn saved anything durable. Call this AFTER
+    the reply has been sent — it makes a slow Gemini call we don't want in the reply
+    path. Best-effort: any failure is swallowed and never costs data."""
+    if not wrote:
+        return
+    _update_summary(_get_client(), household_id)
 
 
 def reply_to(message: str,
              household_id: str = config.DEFAULT_HOUSEHOLD_ID,
              speaker_phone: str = "local-test") -> str:
-    """Convenience wrapper returning just the reply text."""
-    return run_turn(message, household_id, speaker_phone)["text"]
+    """Convenience wrapper returning just the reply text. Used by the local /chat test
+    harness, where there's no separate worker to refresh memory, so it does it inline."""
+    result = run_turn(message, household_id, speaker_phone)
+    maybe_update_summary(household_id, result.get("wrote"))
+    return result["text"]
