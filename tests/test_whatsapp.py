@@ -94,3 +94,17 @@ def test_weekly_nudge_requires_token(monkeypatch):
     monkeypatch.setattr(config, "NUDGE_TOKEN", "secret")
     client = TestClient(main.app)
     assert client.post("/tasks/weekly-nudge", params={"token": "wrong"}).status_code == 403
+
+
+def test_weekly_nudge_fans_out_to_all_phones(tmp_path, monkeypatch):
+    import app.identity as identity
+    monkeypatch.setattr(store, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "NUDGE_TOKEN", "secret")
+    h = identity.resolve_or_create_household("+111")
+    identity.link_phone("+222", h)  # both partners
+    sent = []
+    monkeypatch.setattr(whatsapp, "send_message", lambda to, body: sent.append(to))
+    client = TestClient(main.app)
+    r = client.post("/tasks/weekly-nudge", params={"token": "secret"})
+    assert r.status_code == 200 and r.json()["sent"] == 2
+    assert set(sent) == {"+111", "+222"}
