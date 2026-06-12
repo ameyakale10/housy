@@ -82,7 +82,7 @@ def _declarations() -> List[types.FunctionDeclaration]:
             parameters=_obj({
                 "week_of": _str("Monday's date, YYYY-MM-DD, if known"),
                 "days": _s(types.Type.ARRAY, items=_obj({
-                    "day": _str("e.g. Mon"),
+                    "day": _str("the real calendar date, e.g. 'Mon Jun 16'"),
                     "breakfast": _str(),
                     "lunch": _str(),
                     "dinner": _str(),
@@ -169,7 +169,7 @@ def build_dispatch(household_id: str, speaker_phone: str, wrote: List[str]) -> D
         code = invites.create_invite(household_id, speaker_phone)
         if not code:
             return {"ok": False, "error": "only an existing household member can invite"}
-        return {"ok": True, "code": code, "expires_minutes": 15,
+        return {"ok": True, "code": code, "expires_days": invites.TTL_DAYS,
                 "instructions": "Your partner should text this code to Housy from their own phone."}
 
     def save_profile(**fields):
@@ -202,7 +202,7 @@ def build_dispatch(household_id: str, speaker_phone: str, wrote: List[str]) -> D
             "week_of": week_of or "",
             "status": "active",
             "days": [{
-                "date": d.get("day", ""),
+                "date": d.get("date") or d.get("day", ""),
                 "breakfast": d.get("breakfast"),
                 "lunch": d.get("lunch"),
                 "dinner": d.get("dinner"),
@@ -210,6 +210,7 @@ def build_dispatch(household_id: str, speaker_phone: str, wrote: List[str]) -> D
             "created_at": _now(),
         }
         store.save_meal_plan(household_id, plan)
+        store.set_current_plan(household_id, plan["plan_id"])
         wrote.append("save_meal_plan")
         return {"ok": True, "plan_id": plan["plan_id"], "days": len(plan["days"])}
 
@@ -246,28 +247,56 @@ def build_dispatch(household_id: str, speaker_phone: str, wrote: List[str]) -> D
         list_id = store.current_list_id(household_id)
         if not list_id:
             return {"ok": False, "error": "no current grocery list to edit"}
+        prefs = store.read_store_prefs(household_id)
+        report = {"added": [], "removed": [], "marked_bought": [], "unmatched": []}
+
+        def _match(items, name):
+            """Substring/containment match so 'tomatoes' hits 'Tomatoes (500g)'."""
+            n = (name or "").strip().lower()
+            if not n:
+                return []
+            return [i for i in items
+                    if n == i.get("name", "").lower()
+                    or n in i.get("name", "").lower()
+                    or i.get("name", "").lower() in n]
 
         def mutate(lst):
             items = lst.get("items", [])
+            existing = {i.get("name", "").lower() for i in items}
             for name in (add or []):
+                key = (name or "").strip().lower()
+                if not key or key in existing:
+                    continue  # dedupe
                 items.append({"name": name, "qty": None, "category": "Other",
-                              "status": "needed", "added_by": speaker_phone})
-            if remove:
-                rem = {r.lower() for r in remove}
-                items = [i for i in items if i.get("name", "").lower() not in rem]
-            if mark_bought:
-                mb = {m.lower() for m in mark_bought}
-                for i in items:
-                    if i.get("name", "").lower() in mb:
-                        i["status"] = "bought"
+                              "store": prefs.get(key), "status": "needed",
+                              "added_by": speaker_phone})
+                existing.add(key)
+                report["added"].append(name)
+            remove_ids = set()
+            for name in (remove or []):
+                m = _match(items, name)
+                (report["removed"] if m else report["unmatched"]).append(name)
+                remove_ids |= {id(i) for i in m}
+            items = [i for i in items if id(i) not in remove_ids]
+            for name in (mark_bought or []):
+                m = _match(items, name)
+                (report["marked_bought"] if m else report["unmatched"]).append(name)
+                for i in m:
+                    i["status"] = "bought"
             lst["items"] = items
             return lst
 
         updated = store.update_grocery_list(household_id, list_id, mutate)
         wrote.append("update_grocery_list")
-        return {"ok": updated is not None, "items": len((updated or {}).get("items", []))}
+        return {"ok": updated is not None, "items": len((updated or {}).get("items", [])), **report}
 
     def log_spend(amount=None, store_name: str = "", currency: str = "", date: str = "", **_):
+        try:
+            amt = float(amount)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "a numeric amount is required"}
+        if amt <= 0:
+            return {"ok": False, "error": "amount must be greater than zero"}
         if not currency:  # fall back to the household's location-derived currency
             currency = (store.read_profile(household_id) or {}).get("currency", "") or ""
         bill = {
@@ -276,13 +305,13 @@ def build_dispatch(household_id: str, speaker_phone: str, wrote: List[str]) -> D
             "date": date or _now()[:10],
             "store_name": store_name,
             "currency": currency,
-            "total": amount,
+            "total": amt,
             "line_items": [],
             "created_at": _now(),
         }
         store.save_bill(household_id, bill)
         wrote.append("log_spend")
-        return {"ok": True, "bill_id": bill["bill_id"], "total": amount, "store": store_name}
+        return {"ok": True, "bill_id": bill["bill_id"], "total": amt, "store": store_name}
 
     return {
         "set_speaker_name": set_speaker_name,

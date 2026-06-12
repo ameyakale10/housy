@@ -21,6 +21,26 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 # Default household for the single-tenant MVP (both partners map here).
 DEFAULT_HOUSEHOLD_ID = os.environ.get("DEFAULT_HOUSEHOLD_ID", "h1")
 
+# Deployment env + the local test harness gate. /chat (which trusts a caller-supplied
+# phone) must NOT be exposed in prod — it's a local testing convenience only.
+HOUSY_ENV = os.environ.get("HOUSY_ENV", "dev")
+ENABLE_TEST_CHAT = os.environ.get("ENABLE_TEST_CHAT", "false").lower() in ("1", "true", "yes")
+
+# Weak/placeholder nudge tokens we refuse in production.
+_WEAK_TOKENS = {"", "change-me", "change-me-to-any-secret", "hello"}
+
+
+def missing_prod_secrets() -> list:
+    """Security-critical config that must be present before a public deploy."""
+    missing = []
+    if USE_VERTEX and not GCP_PROJECT:
+        missing.append("GCP_PROJECT")
+    if not TWILIO_AUTH_TOKEN:
+        missing.append("TWILIO_AUTH_TOKEN")
+    if NUDGE_TOKEN in _WEAK_TOKENS:
+        missing.append("NUDGE_TOKEN (set a strong, non-default value)")
+    return missing
+
 # --- WhatsApp / Twilio (M2) ------------------------------------------------
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")

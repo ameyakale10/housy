@@ -230,6 +230,8 @@ def run_turn(message: str,
         if not calls:
             reply_text = (resp.text or "").strip() or reply_text
             break
+        if not resp.candidates:  # safety-blocked / empty response — don't crash the turn
+            break
         contents.append(resp.candidates[0].content)
         parts = []
         for fc in calls:

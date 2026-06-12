@@ -50,17 +50,29 @@ def send_message(to_phone: str, body: str) -> None:
     )
 
 
+MAX_MEDIA_BYTES = 16 * 1024 * 1024  # 16 MB cap — bound memory for a single voice note
+
+
 def download_media(url: str):
-    """Fetch Twilio media bytes (authenticated; follows the redirect to S3).
+    """Fetch Twilio media bytes (authenticated; follows the redirect to S3), streamed
+    with a hard size cap so a huge payload can't exhaust memory.
     Returns (bytes, content_type). Used for inbound voice notes."""
-    r = httpx.get(
+    with httpx.stream(
+        "GET",
         url,
         auth=(config.TWILIO_ACCOUNT_SID, config.TWILIO_AUTH_TOKEN),
         follow_redirects=True,
         timeout=30.0,
-    )
-    r.raise_for_status()
-    return r.content, r.headers.get("content-type", "")
+    ) as r:
+        r.raise_for_status()
+        ctype = r.headers.get("content-type", "")
+        chunks, total = [], 0
+        for chunk in r.iter_bytes():
+            total += len(chunk)
+            if total > MAX_MEDIA_BYTES:
+                raise ValueError("media exceeds size cap")
+            chunks.append(chunk)
+    return b"".join(chunks), ctype
 
 
 def build_relay(speaker_name, wrote) -> str:

@@ -186,8 +186,27 @@ def current_list_id(household_id: str) -> Optional[str]:
     return state.get("current_list_id")
 
 
+def set_current_plan(household_id: str, plan_id: str) -> None:
+    with household_lock(household_id):
+        path = _hid_dir(household_id) / "state.json"
+        state = _read_json(path) or {}
+        state["current_plan_id"] = plan_id
+        _write_json(path, state)
+
+
+def current_plan_id(household_id: str) -> Optional[str]:
+    state = _read_json(_hid_dir(household_id) / "state.json") or {}
+    return state.get("current_plan_id")
+
+
 def latest_meal_plan(household_id: str) -> Optional[dict]:
-    """The most recently saved meal plan for the household (or None)."""
+    """The household's current meal plan (the tracked id), falling back to the newest
+    file by mtime if no id is tracked yet."""
+    pid = current_plan_id(household_id)
+    if pid:
+        p = _read_json(_hid_dir(household_id) / "meal-plans" / f"{pid}.json")
+        if p:
+            return p
     d = _hid_dir(household_id) / "meal-plans"
     if not d.exists():
         return None
