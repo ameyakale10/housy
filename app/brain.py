@@ -61,12 +61,40 @@ def transcribe(audio_bytes: bytes, mime_type: str = "audio/ogg") -> str:
     return (resp.text or "").strip()
 
 
+def _saved_state(household_id: str) -> str:
+    """Compact view of the REAL saved meal plan + grocery list, injected into the prompt
+    so Housy is grounded in what exists and never claims a plan is missing when it isn't."""
+    plan = store.latest_meal_plan(household_id)
+    glist = store.current_grocery_list(household_id)
+    lines = []
+    if plan and plan.get("days"):
+        days = "; ".join(
+            f"{d.get('date') or '?'} dinner: {d.get('dinner') or '-'}"
+            + (f", lunch: {d['lunch']}" if d.get("lunch") else "")
+            + (f", breakfast: {d['breakfast']}" if d.get("breakfast") else "")
+            for d in plan["days"]
+        )
+        lines.append(f"Saved meal plan (week_of {plan.get('week_of') or '?'}): {days}")
+    else:
+        lines.append("Saved meal plan: NONE yet.")
+    if glist and glist.get("items"):
+        items = ", ".join(
+            f"{i.get('name')}{' (bought)' if i.get('status') == 'bought' else ''}"
+            for i in glist["items"]
+        )
+        lines.append(f"Current grocery list ({len(glist['items'])} items): {items}")
+    else:
+        lines.append("Current grocery list: NONE yet.")
+    return "\n".join(lines)
+
+
 def _system_prompt(household_id: str, speaker_name) -> str:
     profile = store.read_profile(household_id)
     memory = store.read_memory_summary(household_id) or "(no memory yet)"
     status = (profile or {}).get("status", "not-onboarded")
     profile_json = json.dumps(profile, indent=2, ensure_ascii=False) if profile else "(none)"
     who = speaker_name or "UNKNOWN — you have not been told this person's name yet"
+    saved = _saved_state(household_id)
     return f"""You are Housy, a warm, practical household assistant for a couple. You talk
 to them over WhatsApp, so keep replies short, friendly, and easy to act on. You help with
 meal planning, grocery lists, and grocery spending.
@@ -84,6 +112,9 @@ TRUTHFULNESS (critical):
   purchases, or prices.
 - When the couple tells you something durable (a preference, a plan, a spend), SAVE it by
   calling the right tool. Do not merely claim you saved it — actually call the tool.
+- NEVER say you saved/created/did something unless you actually called the tool in THIS
+  turn. When asked what the plan, list, or spending is, read it from CURRENT SAVED STATE
+  below and show it; if something exists there, never say it doesn't.
 
 ONBOARDING:
 - If the profile status is 'not-onboarded' (currently: {status}), gently collect their
@@ -100,10 +131,14 @@ ADDING A PARTNER:
 MEAL PLANNING:
 - When they ask you to plan meals and the profile is complete, be decisive: build a
   concrete plan from their cuisine, daily staples, diet and budget (never include
-  allergens). You MUST persist it in the SAME turn by calling save_meal_plan AND
-  save_grocery_list — do this BEFORE or ALONGSIDE telling them the plan. Do not wait for
-  them to confirm before saving; they can always edit it afterwards. Only ask a
-  clarifying question if the profile is missing something essential.
+  allergens). In the SAME turn, call save_meal_plan AND save_grocery_list, and ALWAYS
+  write the FULL plan (every day) in your reply so they can see it — never just say
+  "I saved it" without showing it. Do not ask them to confirm before saving.
+- If a plan already exists in CURRENT SAVED STATE and they ask to see it, show THAT;
+  don't create a duplicate. Only make a new plan when they ask for one.
+
+CURRENT SAVED STATE (the REAL saved data — trust this over your own memory):
+{saved}
 
 THIS HOUSEHOLD'S PROFILE (JSON):
 {profile_json}
@@ -185,6 +220,15 @@ def run_turn(message: str,
             result = fn(**args) if fn else {"error": f"unknown tool {fc.name}"}
             parts.append(types.Part.from_function_response(name=fc.name, response={"result": result}))
         contents.append(types.Content(role="user", parts=parts))
+
+    # Safety net: if a meal plan was just saved but the reply didn't actually show it,
+    # append it so the couple always sees the plan they asked for.
+    if "save_meal_plan" in wrote:
+        if sum(1 for d in ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun") if d in reply_text) < 4:
+            plan = store.latest_meal_plan(household_id)
+            if plan and plan.get("days"):
+                reply_text = (reply_text + "\n\nHere's the plan I saved:\n" + "\n".join(
+                    f"• {d.get('date') or '?'}: {d.get('dinner') or '-'}" for d in plan["days"])).strip()
 
     # Persist the turn (speaker-tagged), then refresh memory if anything was saved.
     store.append_turn(household_id, {"ts": _now(), "speaker": speaker_label, "channel": "chat", "text": message})

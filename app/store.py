@@ -186,6 +186,23 @@ def current_list_id(household_id: str) -> Optional[str]:
     return state.get("current_list_id")
 
 
+def latest_meal_plan(household_id: str) -> Optional[dict]:
+    """The most recently saved meal plan for the household (or None)."""
+    d = _hid_dir(household_id) / "meal-plans"
+    if not d.exists():
+        return None
+    files = list(d.glob("*.json"))
+    if not files:
+        return None
+    return _read_json(max(files, key=lambda p: p.stat().st_mtime))
+
+
+def current_grocery_list(household_id: str) -> Optional[dict]:
+    """The household's active grocery list (or None)."""
+    lid = current_list_id(household_id)
+    return read_grocery_list(household_id, lid) if lid else None
+
+
 # ── inbound idempotency (dedup Twilio retries) ────────────────────────────
 def claim_sid(sid: str) -> bool:
     """Atomically claim a Twilio message SID. Returns True if newly seen (process it),
