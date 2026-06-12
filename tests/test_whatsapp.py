@@ -6,6 +6,7 @@ import app.config as config
 import app.identity as identity
 import app.main as main
 import app.store as store
+from app import taskqueue
 from app.channels import whatsapp
 
 TOKEN = "test-auth-token"
@@ -54,22 +55,62 @@ def test_webhook_rejects_bad_signature(tmp_path, monkeypatch):
     assert r.status_code == 403
 
 
-def test_webhook_accepts_valid_signature_and_dedups(tmp_path, monkeypatch):
+def test_webhook_schedules_processing(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "DATA_DIR", tmp_path)
     monkeypatch.setattr(config, "TWILIO_AUTH_TOKEN", TOKEN)
     monkeypatch.setattr(config, "PUBLIC_BASE_URL", "")
+    monkeypatch.setattr(config, "USE_CLOUD_TASKS", False)
     calls = []
     monkeypatch.setattr(main, "_process_whatsapp", lambda *a: calls.append(a))
-
     client = TestClient(main.app)
     params = _form()
     sig = RequestValidator(TOKEN).compute_signature(URL, params)
-    headers = {"X-Twilio-Signature": sig}
+    r = client.post("/webhook/whatsapp", data=params, headers={"X-Twilio-Signature": sig})
+    assert r.status_code == 200
+    assert calls == [("+15551230000", "hi", None, None, "SM123")]  # phone, body, media, type, sid
 
-    r1 = client.post("/webhook/whatsapp", data=params, headers=headers)
-    r2 = client.post("/webhook/whatsapp", data=params, headers=headers)  # duplicate SID
-    assert r1.status_code == 200 and r2.status_code == 200
-    assert calls == [("+15551230000", "hi", None, None)]  # processed exactly once
+
+def test_process_whatsapp_dedups_sid(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "DATA_DIR", tmp_path)
+    handled = []
+    monkeypatch.setattr(main, "_handle_inbound", lambda *a: handled.append(a))
+    main._process_whatsapp("+1", "hi", None, None, "SMX")
+    main._process_whatsapp("+1", "hi", None, None, "SMX")  # duplicate SID
+    assert len(handled) == 1  # processed exactly once
+
+
+def test_webhook_enqueues_when_cloud_tasks(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "TWILIO_AUTH_TOKEN", TOKEN)
+    monkeypatch.setattr(config, "PUBLIC_BASE_URL", "")
+    monkeypatch.setattr(config, "USE_CLOUD_TASKS", True)
+    enq, proc = [], []
+    monkeypatch.setattr(taskqueue, "enqueue_message", lambda payload: enq.append(payload))
+    monkeypatch.setattr(main, "_process_whatsapp", lambda *a: proc.append(a))
+    client = TestClient(main.app)
+    params = _form()
+    sig = RequestValidator(TOKEN).compute_signature(URL, params)
+    r = client.post("/webhook/whatsapp", data=params, headers={"X-Twilio-Signature": sig})
+    assert r.status_code == 200
+    assert enq and enq[0]["sid"] == "SM123" and enq[0]["from_phone"] == "+15551230000"
+    assert proc == []  # queued, not processed inline
+
+
+def test_worker_requires_oidc(monkeypatch):
+    monkeypatch.setattr(taskqueue, "verify_oidc", lambda h: False)
+    client = TestClient(main.app)
+    assert client.post("/tasks/process", json={"from_phone": "+1", "body": "hi"}).status_code == 403
+
+
+def test_worker_processes_with_valid_oidc(monkeypatch):
+    monkeypatch.setattr(taskqueue, "verify_oidc", lambda h: True)
+    got = []
+    monkeypatch.setattr(main, "_process_whatsapp", lambda *a: got.append(a))
+    client = TestClient(main.app)
+    r = client.post("/tasks/process", json={
+        "from_phone": "+1", "body": "hi", "media_url": None, "media_type": None, "sid": "S1"})
+    assert r.status_code == 200
+    assert got == [("+1", "hi", None, None, "S1")]
 
 
 def test_webhook_routes_voice_note(tmp_path, monkeypatch):
@@ -87,7 +128,7 @@ def test_webhook_routes_voice_note(tmp_path, monkeypatch):
     sig = RequestValidator(TOKEN).compute_signature(URL, params)
     r = client.post("/webhook/whatsapp", data=params, headers={"X-Twilio-Signature": sig})
     assert r.status_code == 200
-    assert calls == [("+15551230000", "", "https://api.twilio.com/x/Media/ME1", "audio/ogg")]
+    assert calls == [("+15551230000", "", "https://api.twilio.com/x/Media/ME1", "audio/ogg", "SMvoice")]
 
 
 def test_weekly_nudge_requires_token(monkeypatch):

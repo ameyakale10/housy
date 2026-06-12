@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel
 
-from app import brain, config, identity, invites, present, store
+from app import brain, config, identity, invites, present, store, taskqueue
 from app.channels import whatsapp
 
 logger = logging.getLogger("housy")
@@ -67,8 +67,13 @@ def chat(body: ChatIn):
     return {"reply": reply, "household_id": household_id}
 
 
-def _process_whatsapp(from_phone: str, body: str, media_url: str = None, media_type: str = None) -> None:
-    """BackgroundTask entry: never let an exception vanish silently — always reply."""
+def _process_whatsapp(from_phone: str, body: str, media_url: str = None,
+                      media_type: str = None, sid: str = "") -> None:
+    """Process one inbound message (BackgroundTask locally, or the Cloud Tasks worker in
+    prod). Dedups on the Twilio SID so duplicate deliveries/retries run once, and never
+    lets an exception vanish silently — always replies."""
+    if sid and not store.claim_sid(sid):
+        return  # duplicate delivery — already handled
     try:
         _handle_inbound(from_phone, body, media_url, media_type)
     except Exception:
@@ -152,10 +157,23 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
         return Response(status_code=200)
 
     sid = params.get("MessageSid", "")
-    if sid and not store.claim_sid(sid):
-        return Response(status_code=200)  # duplicate retry — already handled
+    payload = {"from_phone": from_phone, "body": body, "media_url": media_url,
+               "media_type": media_type, "sid": sid}
+    if config.USE_CLOUD_TASKS:
+        taskqueue.enqueue_message(payload)  # durable async (prod): queue -> worker w/ retries
+    else:
+        background_tasks.add_task(_process_whatsapp, from_phone, body, media_url, media_type, sid)
+    return Response(status_code=200)
 
-    background_tasks.add_task(_process_whatsapp, from_phone, body, media_url, media_type)
+
+@app.post("/tasks/process")
+async def process_task(request: Request):
+    """Cloud Tasks worker: OIDC-authenticated; processes one enqueued message."""
+    if not taskqueue.verify_oidc(request.headers.get("Authorization", "")):
+        raise HTTPException(status_code=403, detail="unauthorized task")
+    p = await request.json()
+    _process_whatsapp(p.get("from_phone", ""), p.get("body", ""),
+                      p.get("media_url"), p.get("media_type"), p.get("sid", ""))
     return Response(status_code=200)
 
 

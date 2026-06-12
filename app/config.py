@@ -54,6 +54,8 @@ def missing_prod_secrets() -> list:
         missing.append("TWILIO_AUTH_TOKEN")
     if NUDGE_TOKEN in _WEAK_TOKENS:
         missing.append("NUDGE_TOKEN (set a strong, non-default value)")
+    if USE_CLOUD_TASKS and (not TASKS_WORKER_URL or not TASKS_SERVICE_ACCOUNT):
+        missing.append("TASKS_WORKER_URL / TASKS_SERVICE_ACCOUNT (USE_CLOUD_TASKS is on)")
     return missing
 
 # --- WhatsApp / Twilio (M2) ------------------------------------------------
