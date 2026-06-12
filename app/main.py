@@ -8,7 +8,7 @@
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel
 
-from app import brain, config, identity, invites, store
+from app import brain, config, identity, invites, present, store
 from app.channels import whatsapp
 
 app = FastAPI(title="Housy")
@@ -88,13 +88,19 @@ def _process_whatsapp(from_phone: str, body: str, media_url: str = None, media_t
     result = brain.run_turn(body, household_id=household_id, speaker_phone=from_phone)
     whatsapp.send_message(from_phone, result["text"])
 
-    # Cross-partner relay: tell the other partner about shared-state changes.
+    # Cross-partner relay: tell the other partner what changed AND share the content.
     partner = identity.other_member_phone(household_id, from_phone)
     if partner:
-        relay = whatsapp.build_relay(result.get("speaker"), result.get("wrote", []))
+        wrote = result.get("wrote", [])
+        relay = whatsapp.build_relay(result.get("speaker"), wrote)
         if relay:
+            msg = f"Housy: {relay}"
+            if any(w in wrote for w in ("save_meal_plan", "save_grocery_list", "update_grocery_list")):
+                content = present.plan_and_list(household_id)
+                if content:
+                    msg += "\n\n" + content
             try:
-                whatsapp.send_message(partner, f"Housy: {relay}")
+                whatsapp.send_message(partner, msg)
             except Exception:
                 pass  # delivery can fail outside the 24h window; non-fatal
 

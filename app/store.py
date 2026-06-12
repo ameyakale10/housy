@@ -203,6 +203,23 @@ def current_grocery_list(household_id: str) -> Optional[dict]:
     return read_grocery_list(household_id, lid) if lid else None
 
 
+# ── item -> store preferences (which store an item is usually bought from) ──
+def read_store_prefs(household_id: str) -> dict:
+    """Map of lowercased item name -> store ('any' means no preference)."""
+    return _read_json(_hid_dir(household_id) / "store_prefs.json") or {}
+
+
+def set_store_pref(household_id: str, item: str, store_name: str) -> None:
+    key = (item or "").strip().lower()
+    if not key:
+        return
+    with household_lock(household_id):
+        path = _hid_dir(household_id) / "store_prefs.json"
+        prefs = _read_json(path) or {}
+        prefs[key] = store_name
+        _write_json(path, prefs)
+
+
 # ── inbound idempotency (dedup Twilio retries) ────────────────────────────
 def claim_sid(sid: str) -> bool:
     """Atomically claim a Twilio message SID. Returns True if newly seen (process it),

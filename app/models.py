@@ -37,6 +37,7 @@ class Profile(BaseModel):
     weeknight_time: Optional[str] = None
     weekend_time: Optional[str] = None
     equipment: List[str] = Field(default_factory=list)
+    stores: List[str] = Field(default_factory=list)       # go-to stores (Costco, etc.)
     notes: str = ""
     status: Literal["not-onboarded", "onboarded"] = "not-onboarded"
 
@@ -73,6 +74,7 @@ class GroceryItem(BaseModel):
     qty: Optional[str] = None
     unit: Optional[str] = None
     category: str = "Other"
+    store: Optional[str] = None                            # preferred store, or "any"
     status: Literal["needed", "bought"] = "needed"
     added_by: str = ""
 

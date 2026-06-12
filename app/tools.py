@@ -73,6 +73,7 @@ def _declarations() -> List[types.FunctionDeclaration]:
                 "currency": _str("Currency code inferred from location, e.g. INR, USD"),
                 "weeknight_time": _str("Realistic weeknight cooking time"),
                 "equipment": _arr_str("Notable kitchen equipment"),
+                "stores": _arr_str("Their go-to stores, e.g. ['Costco','Indian grocery store']"),
             }),
         ),
         types.FunctionDeclaration(
@@ -97,8 +98,19 @@ def _declarations() -> List[types.FunctionDeclaration]:
                     "name": _str(),
                     "qty": _str("quantity + unit, e.g. '500 g'"),
                     "category": _str(),
+                    "store": _str("Preferred store for this item, or 'any'"),
                 }, ["name"])),
             }, ["items"]),
+        ),
+        types.FunctionDeclaration(
+            name="set_item_store",
+            description="Remember which store the couple buys a specific item from. Use "
+            "'any' if it can be bought anywhere. Call this whenever they tell you where "
+            "they get something (e.g. 'we buy paneer from the Indian store').",
+            parameters=_obj({
+                "item": _str("The grocery item, e.g. 'paneer'"),
+                "store": _str("Store name, or 'any'"),
+            }, ["item", "store"]),
         ),
         types.FunctionDeclaration(
             name="update_grocery_list",
@@ -174,6 +186,14 @@ def build_dispatch(household_id: str, speaker_phone: str, wrote: List[str]) -> D
         wrote.append("save_profile")
         return {"ok": True, "status": p.status, "still_missing": p.missing_required()}
 
+    def set_item_store(**kw):
+        item = (kw.get("item") or "").strip()
+        store_name = kw.get("store") or "any"
+        if not item:
+            return {"ok": False, "error": "no item"}
+        store.set_store_pref(household_id, item, store_name)
+        return {"ok": True, "item": item, "store": store_name}
+
     def save_meal_plan(week_of: str = "", days=None, **_):
         days = days or []
         plan = {
@@ -195,24 +215,32 @@ def build_dispatch(household_id: str, speaker_phone: str, wrote: List[str]) -> D
 
     def save_grocery_list(items=None, **_):
         items = items or []
+        prefs = store.read_store_prefs(household_id)
+        built = []
+        for i in items:
+            name = i.get("name", "")
+            if not name:
+                continue
+            built.append({
+                "name": name,
+                "qty": i.get("qty"),
+                "category": i.get("category", "Other"),
+                "store": i.get("store") or prefs.get(name.strip().lower()),
+                "status": "needed",
+                "added_by": speaker_phone,
+            })
         glist = {
             "list_id": _gen_id("list"),
             "household_id": household_id,
             "status": "open",
             "source_type": "meal_plan",
-            "items": [{
-                "name": i.get("name", ""),
-                "qty": i.get("qty"),
-                "category": i.get("category", "Other"),
-                "status": "needed",
-                "added_by": speaker_phone,
-            } for i in items if i.get("name")],
+            "items": built,
             "created_at": _now(),
         }
         store.save_grocery_list(household_id, glist)
         store.set_current_list(household_id, glist["list_id"])
         wrote.append("save_grocery_list")
-        return {"ok": True, "list_id": glist["list_id"], "items": len(glist["items"])}
+        return {"ok": True, "list_id": glist["list_id"], "items": len(built)}
 
     def update_grocery_list(add=None, remove=None, mark_bought=None, **_):
         list_id = store.current_list_id(household_id)
@@ -259,6 +287,7 @@ def build_dispatch(household_id: str, speaker_phone: str, wrote: List[str]) -> D
     return {
         "set_speaker_name": set_speaker_name,
         "create_household_invite": create_household_invite,
+        "set_item_store": set_item_store,
         "save_profile": save_profile,
         "save_meal_plan": save_meal_plan,
         "save_grocery_list": save_grocery_list,

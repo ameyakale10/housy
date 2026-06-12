@@ -16,7 +16,7 @@ import json
 from google import genai
 from google.genai import types
 
-from app import config, identity, store, tools
+from app import config, identity, present, store, tools
 
 MAX_TOOL_ITERS = 8
 TEMPERATURE = 0.3
@@ -95,6 +95,10 @@ def _system_prompt(household_id: str, speaker_name) -> str:
     profile_json = json.dumps(profile, indent=2, ensure_ascii=False) if profile else "(none)"
     who = speaker_name or "UNKNOWN — you have not been told this person's name yet"
     saved = _saved_state(household_id)
+    today = datetime.datetime.now().strftime("%A, %Y-%m-%d")
+    store_prefs = store.read_store_prefs(household_id)
+    prefs_str = ", ".join(f"{k} -> {v}" for k, v in store_prefs.items()) or "none yet"
+    go_to_stores = ", ".join((profile or {}).get("stores") or []) or "not set yet"
     return f"""You are Housy, a warm, practical household assistant for a couple. You talk
 to them over WhatsApp, so keep replies short, friendly, and easy to act on. You help with
 meal planning, grocery lists, and grocery spending.
@@ -118,10 +122,11 @@ TRUTHFULNESS (critical):
 
 ONBOARDING:
 - If the profile status is 'not-onboarded' (currently: {status}), gently collect their
-  cuisine(s), daily staples, diet & allergies, rough weekly budget, and their LOCATION
-  (city/area) — a couple of questions at a time, not all at once — and call save_profile.
-  Use their location to infer and save their `currency` (and later, nearby stores). Status
-  flips to 'onboarded' automatically once cuisine, staples, diet, budget and location are set.
+  cuisine(s), daily staples, diet & allergies, rough weekly budget, their LOCATION
+  (city/area), and their go-to grocery stores — a couple of questions at a time, not all
+  at once — and call save_profile (stores go in the `stores` field). Use their location to
+  infer and save their `currency`. Status flips to 'onboarded' automatically once cuisine,
+  staples, diet, budget and location are set.
 
 ADDING A PARTNER:
 - If the speaker asks to add their partner/spouse, call create_household_invite and give
@@ -129,13 +134,24 @@ ADDING A PARTNER:
   their own phone to join and share everything.
 
 MEAL PLANNING:
+- TODAY is {today}. Plan "this week" using REAL calendar dates: put the actual date on
+  each day (e.g. "Mon Jun 16") and set week_of to this week's Monday. Never use bare day
+  names with no date.
 - When they ask you to plan meals and the profile is complete, be decisive: build a
   concrete plan from their cuisine, daily staples, diet and budget (never include
   allergens). In the SAME turn, call save_meal_plan AND save_grocery_list, and ALWAYS
   write the FULL plan (every day) in your reply so they can see it — never just say
   "I saved it" without showing it. Do not ask them to confirm before saving.
+- For the grocery list, assign each item its store from the couple's known preferences
+  below; items with no preference can be "any".
 - If a plan already exists in CURRENT SAVED STATE and they ask to see it, show THAT;
   don't create a duplicate. Only make a new plan when they ask for one.
+
+STORES & SHOPPING:
+- Their go-to stores: {go_to_stores}.
+- Known item -> store preferences: {prefs_str}.
+- When they tell you they buy an item from a certain store, call set_item_store to
+  remember it. Group grocery lists by store so they know what to buy where.
 
 CURRENT SAVED STATE (the REAL saved data — trust this over your own memory):
 {saved}
@@ -225,10 +241,9 @@ def run_turn(message: str,
     # append it so the couple always sees the plan they asked for.
     if "save_meal_plan" in wrote:
         if sum(1 for d in ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun") if d in reply_text) < 4:
-            plan = store.latest_meal_plan(household_id)
-            if plan and plan.get("days"):
-                reply_text = (reply_text + "\n\nHere's the plan I saved:\n" + "\n".join(
-                    f"• {d.get('date') or '?'}: {d.get('dinner') or '-'}" for d in plan["days"])).strip()
+            block = present.format_meal_plan(store.latest_meal_plan(household_id))
+            if block:
+                reply_text = (reply_text + "\n\n" + block).strip()
 
     # Persist the turn (speaker-tagged), then refresh memory if anything was saved.
     store.append_turn(household_id, {"ts": _now(), "speaker": speaker_label, "channel": "chat", "text": message})
