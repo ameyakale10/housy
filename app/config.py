@@ -30,6 +30,7 @@ ENABLE_TEST_CHAT = os.environ.get("ENABLE_TEST_CHAT", "false").lower() in ("1", 
 # Storage: 'file' (local dev + unit tests) or 'firestore' (prod). Defaults to file so
 # nothing changes until the Firestore backend is wired and selected.
 STORAGE_BACKEND = os.environ.get("STORAGE_BACKEND", "file")
+GCP_FIRESTORE_DATABASE = os.environ.get("GCP_FIRESTORE_DATABASE", "(default)")
 
 # Async: when true, the webhook enqueues to Cloud Tasks and a worker processes the
 # message (durable + autoscaling). When false, processing runs inline/BackgroundTask

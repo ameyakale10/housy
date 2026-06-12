@@ -336,3 +336,29 @@ def record_redeem_attempt(phone: str, window: float, now: float) -> int:
         data[phone] = attempts[-50:]
         _write_json(_attempts_path(), data)
         return len(attempts)
+
+
+# ── backend selection ──────────────────────────────────────────────────────
+# Everything above is the FILE backend (local dev + tests). When configured for
+# Firestore, rebind every public name to the Firestore backend (same signatures),
+# so the rest of the app is unchanged.
+import app.config as _config  # noqa: E402
+
+if _config.STORAGE_BACKEND == "firestore":
+    from app.storage import firestore_backend as _fb  # noqa: E402
+
+    _PUBLIC = (
+        "household_lock", "read_profile", "write_profile",
+        "save_meal_plan", "latest_meal_plan",
+        "save_grocery_list", "read_grocery_list", "update_grocery_list", "current_grocery_list",
+        "save_bill",
+        "read_memory_summary", "write_memory_summary", "append_turn", "read_history",
+        "resolve_household",
+        "set_current_list", "current_list_id", "set_current_plan", "current_plan_id",
+        "read_store_prefs", "set_store_pref",
+        "claim_sid", "all_phone_household_pairs",
+        "get_household_for_phone", "get_or_create_household", "map_phone",
+        "put_invite", "get_invite", "consume_invite", "record_redeem_attempt",
+    )
+    for _n in _PUBLIC:
+        globals()[_n] = getattr(_fb, _n)
