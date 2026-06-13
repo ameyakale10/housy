@@ -19,36 +19,44 @@ def resolve_or_create_household(phone: str) -> str:
     can never land in someone else's data. Partners are joined explicitly via
     link_phone().
     """
-    index_path = store.DATA_DIR / "households" / "index.json"
-    with store.household_lock("__index__"):
-        index = store._read_json(index_path) or {}
-        hid = index.get(phone)
-        if hid:
-            return hid
-        taken = set(index.values())
-        n = 1
-        while f"h{n}" in taken:
-            n += 1
-        hid = f"h{n}"
-        index[phone] = hid
-        store._write_json(index_path, index)
+    hid = store.get_or_create_household(phone)
     # Seed a not-onboarded profile with this phone as the first member.
     if store.read_profile(hid) is None:
         store.write_profile(hid, Profile(household_id=hid, members=[Member(phone=phone)]).model_dump())
     return hid
 
 
-def link_phone(phone: str, household_id: str) -> None:
-    """Map an additional phone (the partner) to an existing household so the two
-    share state. Used to put both partners in the same household for the MVP."""
-    index_path = store.DATA_DIR / "households" / "index.json"
-    with store.household_lock("__index__"):
-        index = store._read_json(index_path) or {}
-        index[phone] = household_id
-        store._write_json(index_path, index)
-    prof = store.read_profile(household_id) or Profile(household_id=household_id).model_dump()
-    if not any(m.get("phone") == phone for m in prof.get("members", [])):
-        prof.setdefault("members", []).append({"name": "", "phone": phone, "role": ""})
+def link_phone(phone: str, household_id: str, name: str = None) -> None:
+    """Map an additional phone (the partner) to an existing household so the two share
+    state. Adds them to the member list (atomically), carrying their known name if we
+    have one — so a partner who already told Housy their name isn't asked again."""
+    store.map_phone(phone, household_id)
+
+    def _add(prof):
+        members = prof.setdefault("members", [])
+        for m in members:
+            if m.get("phone") == phone:
+                if name and not m.get("name"):
+                    m["name"] = name  # fill in a name we now know
+                return prof
+        members.append({"name": name or "", "phone": phone, "role": ""})
+        return prof
+
+    store.update_profile(household_id, _add)
+
+
+def remove_from_household(phone: str, household_id: str) -> None:
+    """Drop a phone from a household. If no members with a phone remain, delete the whole
+    household — this clears the orphaned solo household left behind when someone joins
+    their partner's household instead of keeping their own."""
+    prof = store.read_profile(household_id)
+    if not prof:
+        return
+    members = [m for m in prof.get("members", []) if m.get("phone") != phone]
+    if not any(m.get("phone") for m in members):
+        store.delete_household(household_id)
+    else:
+        prof["members"] = members
         store.write_profile(household_id, prof)
 
 
@@ -72,13 +80,18 @@ def other_member_phone(household_id: str, phone: str):
 
 
 def set_member_name(household_id: str, phone: str, name: str) -> None:
-    """Save the speaker's name on their member record (keyed by phone)."""
-    prof = store.read_profile(household_id) or Profile(household_id=household_id).model_dump()
-    members = prof.setdefault("members", [])
-    for m in members:
-        if m.get("phone") == phone:
-            m["name"] = name
-            break
-    else:
-        members.append({"name": name, "phone": phone, "role": ""})
-    store.write_profile(household_id, prof)
+    """Save the speaker's name on their member record (keyed by phone), ATOMICALLY — so a
+    concurrent link_phone (partner joining) can't be clobbered by this write, which would
+    silently drop the just-added member."""
+
+    def _set(prof):
+        members = prof.setdefault("members", [])
+        for m in members:
+            if m.get("phone") == phone:
+                m["name"] = name
+                break
+        else:
+            members.append({"name": name, "phone": phone, "role": ""})
+        return prof
+
+    store.update_profile(household_id, _set)

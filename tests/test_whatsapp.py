@@ -6,6 +6,7 @@ import app.config as config
 import app.identity as identity
 import app.main as main
 import app.store as store
+from app import taskqueue
 from app.channels import whatsapp
 
 TOKEN = "test-auth-token"
@@ -54,22 +55,102 @@ def test_webhook_rejects_bad_signature(tmp_path, monkeypatch):
     assert r.status_code == 403
 
 
-def test_webhook_accepts_valid_signature_and_dedups(tmp_path, monkeypatch):
+def test_webhook_schedules_processing(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "DATA_DIR", tmp_path)
     monkeypatch.setattr(config, "TWILIO_AUTH_TOKEN", TOKEN)
     monkeypatch.setattr(config, "PUBLIC_BASE_URL", "")
+    monkeypatch.setattr(config, "USE_CLOUD_TASKS", False)
     calls = []
     monkeypatch.setattr(main, "_process_whatsapp", lambda *a: calls.append(a))
-
     client = TestClient(main.app)
     params = _form()
     sig = RequestValidator(TOKEN).compute_signature(URL, params)
-    headers = {"X-Twilio-Signature": sig}
+    r = client.post("/webhook/whatsapp", data=params, headers={"X-Twilio-Signature": sig})
+    assert r.status_code == 200
+    assert calls == [("+15551230000", "hi", None, None, "SM123")]  # phone, body, media, type, sid
 
-    r1 = client.post("/webhook/whatsapp", data=params, headers=headers)
-    r2 = client.post("/webhook/whatsapp", data=params, headers=headers)  # duplicate SID
-    assert r1.status_code == 200 and r2.status_code == 200
-    assert calls == [("+15551230000", "hi", None, None)]  # processed exactly once
+
+def test_process_whatsapp_dedups_sid(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "DATA_DIR", tmp_path)
+    handled = []
+    monkeypatch.setattr(main, "_handle_inbound", lambda *a: handled.append(a))
+    main._process_whatsapp("+1", "hi", None, None, "SMX")
+    main._process_whatsapp("+1", "hi", None, None, "SMX")  # duplicate SID
+    assert len(handled) == 1  # processed exactly once
+
+
+def test_webhook_enqueues_when_cloud_tasks(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "TWILIO_AUTH_TOKEN", TOKEN)
+    monkeypatch.setattr(config, "PUBLIC_BASE_URL", "")
+    monkeypatch.setattr(config, "USE_CLOUD_TASKS", True)
+    enq, proc = [], []
+    monkeypatch.setattr(taskqueue, "enqueue_message", lambda payload: enq.append(payload))
+    monkeypatch.setattr(main, "_process_whatsapp", lambda *a: proc.append(a))
+    client = TestClient(main.app)
+    params = _form()
+    sig = RequestValidator(TOKEN).compute_signature(URL, params)
+    r = client.post("/webhook/whatsapp", data=params, headers={"X-Twilio-Signature": sig})
+    assert r.status_code == 200
+    assert enq and enq[0]["sid"] == "SM123" and enq[0]["from_phone"] == "+15551230000"
+    assert proc == []  # queued, not processed inline
+
+
+def test_worker_requires_oidc(monkeypatch):
+    monkeypatch.setattr(taskqueue, "verify_oidc", lambda h: False)
+    client = TestClient(main.app)
+    assert client.post("/tasks/process", json={"from_phone": "+1", "body": "hi"}).status_code == 403
+
+
+def test_worker_processes_with_valid_oidc(monkeypatch):
+    monkeypatch.setattr(taskqueue, "verify_oidc", lambda h: True)
+    got = []
+    monkeypatch.setattr(main, "_process_whatsapp", lambda *a, **k: got.append((a, k)))
+    client = TestClient(main.app)
+    r = client.post("/tasks/process", json={
+        "from_phone": "+1", "body": "hi", "media_url": None, "media_type": None, "sid": "S1"})
+    assert r.status_code == 200
+    assert got == [(("+1", "hi", None, None, "S1"), {"raise_on_error": True})]
+
+
+def test_release_sid_allows_reprocess(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "DATA_DIR", tmp_path)
+    assert store.claim_sid("SMr") is True
+    assert store.claim_sid("SMr") is False          # already claimed
+    store.release_sid("SMr")
+    assert store.claim_sid("SMr") is True            # reclaimable after release
+
+
+def test_local_failure_apologizes_and_releases_sid(tmp_path, monkeypatch):
+    """BackgroundTask path (raise_on_error=False): on failure it must NOT raise, must
+    apologize to the user, and must release the SID (no queue to retry locally)."""
+    monkeypatch.setattr(store, "DATA_DIR", tmp_path)
+
+    def boom(*a):
+        raise RuntimeError("brain down")
+
+    sent = []
+    monkeypatch.setattr(main, "_handle_inbound", boom)
+    monkeypatch.setattr(whatsapp, "send_message", lambda to, body: sent.append((to, body)))
+    main._process_whatsapp("+1", "hi", None, None, "SMlocal")  # raise_on_error defaults False
+    assert sent and "went wrong" in sent[0][1]            # apology delivered
+    assert store.claim_sid("SMlocal") is True             # SID released -> reclaimable
+
+
+def test_worker_retries_on_failure(tmp_path, monkeypatch):
+    """A failed turn must return 500 (so Cloud Tasks retries) AND release the SID, so the
+    retry re-processes instead of being deduped away as 'already handled'."""
+    monkeypatch.setattr(store, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(taskqueue, "verify_oidc", lambda h: True)
+
+    def boom(*a):
+        raise RuntimeError("gemini down")
+
+    monkeypatch.setattr(main, "_handle_inbound", boom)
+    client = TestClient(main.app, raise_server_exceptions=False)
+    r = client.post("/tasks/process", json={"from_phone": "+1", "body": "hi", "sid": "SMfail"})
+    assert r.status_code == 500                       # signals Cloud Tasks to retry
+    assert store.claim_sid("SMfail") is True          # SID released -> reprocessable
 
 
 def test_webhook_routes_voice_note(tmp_path, monkeypatch):
@@ -87,13 +168,15 @@ def test_webhook_routes_voice_note(tmp_path, monkeypatch):
     sig = RequestValidator(TOKEN).compute_signature(URL, params)
     r = client.post("/webhook/whatsapp", data=params, headers={"X-Twilio-Signature": sig})
     assert r.status_code == 200
-    assert calls == [("+15551230000", "", "https://api.twilio.com/x/Media/ME1", "audio/ogg")]
+    assert calls == [("+15551230000", "", "https://api.twilio.com/x/Media/ME1", "audio/ogg", "SMvoice")]
 
 
 def test_weekly_nudge_requires_token(monkeypatch):
     monkeypatch.setattr(config, "NUDGE_TOKEN", "secret")
     client = TestClient(main.app)
-    assert client.post("/tasks/weekly-nudge", params={"token": "wrong"}).status_code == 403
+    # wrong token in the header is rejected; a token in the URL is ignored (header-only now)
+    assert client.post("/tasks/weekly-nudge", headers={"X-Nudge-Token": "wrong"}).status_code == 403
+    assert client.post("/tasks/weekly-nudge", params={"token": "secret"}).status_code == 403
 
 
 def test_weekly_nudge_fans_out_to_all_phones(tmp_path, monkeypatch):
@@ -105,6 +188,6 @@ def test_weekly_nudge_fans_out_to_all_phones(tmp_path, monkeypatch):
     sent = []
     monkeypatch.setattr(whatsapp, "send_message", lambda to, body: sent.append(to))
     client = TestClient(main.app)
-    r = client.post("/tasks/weekly-nudge", params={"token": "secret"})
+    r = client.post("/tasks/weekly-nudge", headers={"X-Nudge-Token": "secret"})
     assert r.status_code == 200 and r.json()["sent"] == 2
     assert set(sent) == {"+111", "+222"}

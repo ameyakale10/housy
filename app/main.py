@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel
 
-from app import brain, config, identity, invites, present, store
+from app import brain, config, identity, invites, present, store, taskqueue
 from app.channels import whatsapp
 
 logger = logging.getLogger("housy")
@@ -67,12 +67,31 @@ def chat(body: ChatIn):
     return {"reply": reply, "household_id": household_id}
 
 
-def _process_whatsapp(from_phone: str, body: str, media_url: str = None, media_type: str = None) -> None:
-    """BackgroundTask entry: never let an exception vanish silently — always reply."""
+def _process_whatsapp(from_phone: str, body: str, media_url: str = None,
+                      media_type: str = None, sid: str = "",
+                      raise_on_error: bool = False) -> None:
+    """Process one inbound message (BackgroundTask locally, or the Cloud Tasks worker in
+    prod). Dedups on the Twilio SID so duplicate deliveries run once.
+
+    On failure the two callers behave differently, on purpose:
+    - Cloud Tasks worker (raise_on_error=True): release the SID claim and re-raise, so the
+      endpoint returns 500 and the queue RETRIES. Without releasing, the retry would see
+      the SID as already handled and silently drop the message — the exact bug that lost
+      messages during the Twilio outage.
+    - Local BackgroundTask (raise_on_error=False): there's no queue to retry, so apologise
+      to the user instead of leaving them hanging.
+    Reaching the failure path means the reply never went out (everything after the user
+    send is best-effort and swallowed), so a retry can't double-reply."""
+    if sid and not store.claim_sid(sid):
+        return  # duplicate delivery — already handled
     try:
         _handle_inbound(from_phone, body, media_url, media_type)
     except Exception:
         logger.exception("processing failed for %s", from_phone)
+        if sid:
+            store.release_sid(sid)  # let a retry re-claim and re-process
+        if raise_on_error:
+            raise  # Cloud Tasks worker -> 500 -> queue retries with backoff
         try:
             whatsapp.send_message(from_phone, "Sorry, something went wrong on my end — please try again in a moment.")
         except Exception:
@@ -98,17 +117,24 @@ def _handle_inbound(from_phone: str, body: str, media_url: str, media_type: str)
     if inv is not None:
         if inv.get("ok"):
             hid, inviter = inv["household_id"], inv["inviter"]
-            msg = (f"🎉 You've joined {inviter}'s Housy household! You now share meal plans, "
-                   f"grocery lists and spending. What's your name?")
+            joiner = identity.member_name(hid, from_phone)  # carried over if they told us already
+            if joiner:
+                msg = (f"🎉 You've joined {inviter}'s Housy household, {joiner}! You now share "
+                       f"meal plans, grocery lists and spending.")
+            else:
+                msg = (f"🎉 You've joined {inviter}'s Housy household! You now share meal plans, "
+                       f"grocery lists and spending. What's your name?")
             store.append_turn(hid, {"speaker": from_phone, "channel": "whatsapp", "text": body})
             store.append_turn(hid, {"speaker": "housy", "channel": "whatsapp", "text": msg})
             whatsapp.send_message(from_phone, msg)
-            partner = identity.other_member_phone(hid, from_phone)
-            if partner:
-                try:
+            # Post-send: must not raise (a throw here re-runs an already-consumed redeem on
+            # retry, so the joiner would get an "invalid code" error for a join that worked).
+            try:
+                partner = identity.other_member_phone(hid, from_phone)
+                if partner:
                     whatsapp.send_message(partner, "Housy: Your partner just joined your household 🎉")
-                except Exception:
-                    pass
+            except Exception:
+                logger.exception("partner-join relay failed for %s (joiner already notified)", from_phone)
         else:
             whatsapp.send_message(from_phone, _INVITE_FAIL.get(inv["reason"], _INVITE_FAIL["invalid"]))
         return
@@ -117,21 +143,30 @@ def _handle_inbound(from_phone: str, body: str, media_url: str, media_type: str)
     result = brain.run_turn(body, household_id=household_id, speaker_phone=from_phone)
     whatsapp.send_message(from_phone, result["text"])
 
-    # Cross-partner relay: tell the other partner what changed AND share the content.
-    partner = identity.other_member_phone(household_id, from_phone)
-    if partner:
-        wrote = result.get("wrote", [])
-        relay = whatsapp.build_relay(result.get("speaker"), wrote)
-        if relay:
-            msg = f"Housy: {relay}"
-            if any(w in wrote for w in ("save_meal_plan", "save_grocery_list", "update_grocery_list")):
-                content = present.plan_and_list(household_id)
-                if content:
-                    msg += "\n\n" + content
-            try:
-                whatsapp.send_message(partner, msg)
-            except Exception:
-                pass  # delivery can fail outside the 24h window; non-fatal
+    # EVERYTHING below runs AFTER the user's reply is out the door, so it must never
+    # raise: on the Cloud Tasks path an exception here would release the SID and return
+    # 500, making the queue retry and DOUBLE-SEND the reply (and re-run the LLM, dup'ing
+    # saved plans/lists). One best-effort guard around the whole tail enforces the
+    # "nothing throws after the send" invariant the retry-safety design depends on.
+    try:
+        # Cross-partner relay: tell the other partner what changed AND share the content.
+        partner = identity.other_member_phone(household_id, from_phone)
+        if partner:
+            wrote = result.get("wrote", [])
+            relay = whatsapp.build_relay(result.get("speaker"), wrote)
+            if relay:
+                msg = f"Housy: {relay}"
+                if any(w in wrote for w in ("save_meal_plan", "save_grocery_list", "update_grocery_list")):
+                    content = present.plan_and_list(household_id)
+                    if content:
+                        msg += "\n\n" + content
+                whatsapp.send_message(partner, msg)  # can fail outside the 24h window; non-fatal
+
+        # Refresh long-term memory LAST — after both replies are sent — so the slow second
+        # Gemini call never delays what the couple sees.
+        brain.maybe_update_summary(household_id, result.get("wrote"))
+    except Exception:
+        logger.exception("post-reply tail failed for %s (reply already sent)", from_phone)
 
 
 @app.post("/webhook/whatsapp")
@@ -152,17 +187,35 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
         return Response(status_code=200)
 
     sid = params.get("MessageSid", "")
-    if sid and not store.claim_sid(sid):
-        return Response(status_code=200)  # duplicate retry — already handled
+    payload = {"from_phone": from_phone, "body": body, "media_url": media_url,
+               "media_type": media_type, "sid": sid}
+    if config.USE_CLOUD_TASKS:
+        taskqueue.enqueue_message(payload)  # durable async (prod): queue -> worker w/ retries
+    else:
+        background_tasks.add_task(_process_whatsapp, from_phone, body, media_url, media_type, sid)
+    return Response(status_code=200)
 
-    background_tasks.add_task(_process_whatsapp, from_phone, body, media_url, media_type)
+
+@app.post("/tasks/process")
+async def process_task(request: Request):
+    """Cloud Tasks worker: OIDC-authenticated; processes one enqueued message."""
+    if not taskqueue.verify_oidc(request.headers.get("Authorization", "")):
+        raise HTTPException(status_code=403, detail="unauthorized task")
+    p = await request.json()
+    # raise_on_error=True: a genuine failure propagates as HTTP 500 so Cloud Tasks retries
+    # (the queue's durability is the whole point of routing through it).
+    _process_whatsapp(p.get("from_phone", ""), p.get("body", ""),
+                      p.get("media_url"), p.get("media_type"), p.get("sid", ""),
+                      raise_on_error=True)
     return Response(status_code=200)
 
 
 @app.post("/tasks/weekly-nudge")
-def weekly_nudge(token: str = ""):
+def weekly_nudge(request: Request):
     """Hit by an external cron once a week. In production the nudge MUST be a registered
-    WhatsApp template (24h-window rule)."""
+    WhatsApp template (24h-window rule). The shared secret travels in a HEADER, not the URL
+    query string — query strings get written to access logs, so a URL token leaks."""
+    token = request.headers.get("X-Nudge-Token", "")
     if not config.NUDGE_TOKEN or not hmac.compare_digest(token, config.NUDGE_TOKEN):
         raise HTTPException(status_code=403, detail="bad nudge token")
     sent = 0

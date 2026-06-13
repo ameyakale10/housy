@@ -68,6 +68,25 @@ def test_onboarded_member_not_silently_moved(tmp_path, monkeypatch):
     assert invites.redeem(code, "+222")["reason"] == "already_member"
 
 
+def test_redeem_carries_name_and_cleans_orphan(tmp_path, monkeypatch):
+    """Partner texts first (gets their own household + tells Housy their name), THEN joins.
+    Their name must carry over, and their old solo household must be cleaned up."""
+    h = _household(tmp_path, monkeypatch)
+    other = identity.resolve_or_create_household("+222")      # +222's own solo household
+    identity.set_member_name(other, "+222", "Swati")          # she told Housy her name first
+    assert other != h
+
+    code = invites.create_invite(h, "+111")
+    res = invites.redeem(code, "+222")
+    assert res["ok"] and res["household_id"] == h
+
+    assert identity.member_name(h, "+222") == "Swati"         # name carried into the couple
+    assert store.read_profile(other) is None                  # orphan household removed
+    # she is NOT left as a phantom empty-name member anywhere
+    members = store.read_profile(h)["members"]
+    assert any(m["phone"] == "+222" and m["name"] == "Swati" for m in members)
+
+
 def test_maybe_redeem(tmp_path, monkeypatch):
     h = _household(tmp_path, monkeypatch)
     code = invites.create_invite(h, "+111")

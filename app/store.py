@@ -22,6 +22,7 @@ rather than asyncio.Lock.
 """
 import json
 import os
+import shutil
 import threading
 from contextlib import contextmanager
 from pathlib import Path
@@ -84,6 +85,20 @@ def read_profile(household_id: str = DEFAULT_HOUSEHOLD_ID) -> Optional[dict]:
 def write_profile(household_id: str, profile: dict) -> None:
     with household_lock(household_id):
         _write_json(_hid_dir(household_id) / "profile.json", profile)
+
+
+def update_profile(household_id: str, mutate: Callable[[dict], dict]) -> dict:
+    """Atomic read-modify-write of the profile (closes the partner lost-update bug).
+
+    `mutate` receives the current profile (or a minimal stub if none exists yet) and
+    returns the updated one; the whole read->mutate->write runs under the household lock,
+    so two partners saving at the same instant can't clobber each other's fields.
+    """
+    with household_lock(household_id):
+        current = _read_json(_hid_dir(household_id) / "profile.json") or {"household_id": household_id}
+        updated = mutate(current)
+        _write_json(_hid_dir(household_id) / "profile.json", updated)
+        return updated
 
 
 # ── meal plans / grocery lists / bills ────────────────────────────────────
@@ -253,7 +268,133 @@ def claim_sid(sid: str) -> bool:
         return True
 
 
+def release_sid(sid: str) -> None:
+    """Undo a claim so a failed message can be re-processed on retry. Called when
+    processing raised after the SID was claimed — without this the retry would see the
+    SID as 'already handled' and silently drop the message."""
+    with household_lock("__sids__"):
+        path = DATA_DIR / "processed-sids.json"
+        data = _read_json(path) or {"sids": []}
+        if sid in data["sids"]:
+            data["sids"] = [s for s in data["sids"] if s != sid]
+            _write_json(path, data)
+
+
 def all_phone_household_pairs() -> list:
     """Every (phone, household_id) mapping — used to fan out the weekly nudge."""
-    index = _read_json(DATA_DIR / "households" / "index.json") or {}
+    index = _read_json(_index_path()) or {}
     return list(index.items())
+
+
+# ── phone → household index (used by identity) ────────────────────────────
+def _index_path() -> Path:
+    return DATA_DIR / "households" / "index.json"
+
+
+def get_household_for_phone(phone: str) -> Optional[str]:
+    return (_read_json(_index_path()) or {}).get(phone)
+
+
+def get_or_create_household(phone: str) -> str:
+    """Atomically return this phone's household, or allocate a fresh isolated one."""
+    with household_lock("__index__"):
+        index = _read_json(_index_path()) or {}
+        hid = index.get(phone)
+        if hid:
+            return hid
+        taken = set(index.values())
+        n = 1
+        while f"h{n}" in taken:
+            n += 1
+        hid = f"h{n}"
+        index[phone] = hid
+        _write_json(_index_path(), index)
+        return hid
+
+
+def map_phone(phone: str, household_id: str) -> None:
+    """Atomically point a phone at a household (used to join a partner)."""
+    with household_lock("__index__"):
+        index = _read_json(_index_path()) or {}
+        index[phone] = household_id
+        _write_json(_index_path(), index)
+
+
+def delete_household(household_id: str) -> None:
+    """Remove a household and all its data. Used to clean up an orphaned solo household
+    when its only member moves into their partner's household."""
+    with household_lock(household_id):
+        d = _hid_dir(household_id)
+        if d.exists():
+            shutil.rmtree(d)
+
+
+# ── invites + redeem attempts (used by invites) ───────────────────────────
+def _invites_path() -> Path:
+    return DATA_DIR / "households" / "invites.json"
+
+
+def _attempts_path() -> Path:
+    return DATA_DIR / "households" / "redeem_attempts.json"
+
+
+def put_invite(code: str, data: dict, now: float) -> None:
+    """Store an invite, pruning any expired ones first."""
+    with household_lock("__invites__"):
+        live = {k: v for k, v in (_read_json(_invites_path()) or {}).items()
+                if v.get("expires", 0) > now}
+        live[code] = data
+        _write_json(_invites_path(), live)
+
+
+def get_invite(code: str) -> Optional[dict]:
+    return (_read_json(_invites_path()) or {}).get(code)
+
+
+def consume_invite(code: str, now: float) -> Optional[dict]:
+    """Atomically remove and return an invite if present and unexpired (single-use)."""
+    with household_lock("__invites__"):
+        invites = _read_json(_invites_path()) or {}
+        inv = invites.get(code)
+        if not inv or inv.get("expires", 0) <= now:
+            return None
+        del invites[code]
+        _write_json(_invites_path(), invites)
+        return inv
+
+
+def record_redeem_attempt(phone: str, window: float, now: float) -> int:
+    """Record a redeem attempt; return how many attempts are in the current window."""
+    with household_lock("__invites__"):
+        data = _read_json(_attempts_path()) or {}
+        attempts = [t for t in data.get(phone, []) if now - t < window]
+        attempts.append(now)
+        data[phone] = attempts[-50:]
+        _write_json(_attempts_path(), data)
+        return len(attempts)
+
+
+# ── backend selection ──────────────────────────────────────────────────────
+# Everything above is the FILE backend (local dev + tests). When configured for
+# Firestore, rebind every public name to the Firestore backend (same signatures),
+# so the rest of the app is unchanged.
+import app.config as _config  # noqa: E402
+
+if _config.STORAGE_BACKEND == "firestore":
+    from app.storage import firestore_backend as _fb  # noqa: E402
+
+    _PUBLIC = (
+        "household_lock", "read_profile", "write_profile", "update_profile",
+        "save_meal_plan", "latest_meal_plan",
+        "save_grocery_list", "read_grocery_list", "update_grocery_list", "current_grocery_list",
+        "save_bill",
+        "read_memory_summary", "write_memory_summary", "append_turn", "read_history",
+        "resolve_household",
+        "set_current_list", "current_list_id", "set_current_plan", "current_plan_id",
+        "read_store_prefs", "set_store_pref",
+        "claim_sid", "release_sid", "all_phone_household_pairs",
+        "get_household_for_phone", "get_or_create_household", "map_phone", "delete_household",
+        "put_invite", "get_invite", "consume_invite", "record_redeem_attempt",
+    )
+    for _n in _PUBLIC:
+        globals()[_n] = getattr(_fb, _n)

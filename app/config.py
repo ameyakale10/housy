@@ -26,6 +26,21 @@ DEFAULT_HOUSEHOLD_ID = os.environ.get("DEFAULT_HOUSEHOLD_ID", "h1")
 HOUSY_ENV = os.environ.get("HOUSY_ENV", "dev")
 ENABLE_TEST_CHAT = os.environ.get("ENABLE_TEST_CHAT", "false").lower() in ("1", "true", "yes")
 
+# --- M4: storage backend + async processing ---------------------------------
+# Storage: 'file' (local dev + unit tests) or 'firestore' (prod). Defaults to file so
+# nothing changes until the Firestore backend is wired and selected.
+STORAGE_BACKEND = os.environ.get("STORAGE_BACKEND", "file")
+GCP_FIRESTORE_DATABASE = os.environ.get("GCP_FIRESTORE_DATABASE", "(default)")
+
+# Async: when true, the webhook enqueues to Cloud Tasks and a worker processes the
+# message (durable + autoscaling). When false, processing runs inline/BackgroundTask
+# (local dev). Defaults false.
+USE_CLOUD_TASKS = os.environ.get("USE_CLOUD_TASKS", "false").lower() in ("1", "true", "yes")
+TASKS_QUEUE = os.environ.get("TASKS_QUEUE", "housy-messages")
+TASKS_LOCATION = os.environ.get("TASKS_LOCATION", "us-central1")
+TASKS_WORKER_URL = os.environ.get("TASKS_WORKER_URL", "")        # https://<run-url>/tasks/process
+TASKS_SERVICE_ACCOUNT = os.environ.get("TASKS_SERVICE_ACCOUNT", "")  # OIDC identity for the worker call
+
 # Weak/placeholder nudge tokens we refuse in production.
 _WEAK_TOKENS = {"", "change-me", "change-me-to-any-secret", "hello"}
 
@@ -39,6 +54,8 @@ def missing_prod_secrets() -> list:
         missing.append("TWILIO_AUTH_TOKEN")
     if NUDGE_TOKEN in _WEAK_TOKENS:
         missing.append("NUDGE_TOKEN (set a strong, non-default value)")
+    if USE_CLOUD_TASKS and (not TASKS_WORKER_URL or not TASKS_SERVICE_ACCOUNT):
+        missing.append("TASKS_WORKER_URL / TASKS_SERVICE_ACCOUNT (USE_CLOUD_TASKS is on)")
     return missing
 
 # --- WhatsApp / Twilio (M2) ------------------------------------------------
